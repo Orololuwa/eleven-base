@@ -83,6 +83,27 @@ def test_resolve_existing_identity(db: Session, cleanup):
     assert len(resolved.identities) == 1
 
 
+def test_resolve_existing_identity_backfills_email(db: Session, cleanup):
+    email = f"backfill-{uuid.uuid4()}@example.com"
+    sub = f"google-oauth2|{uuid.uuid4()}"
+    cleanup(email=email, sub=sub)
+
+    user = User(email=None, email_verified=False)
+    db.add(user)
+    db.flush()
+    db.add(
+        UserIdentity(
+            user_id=user.id, auth0_sub=sub, provider=IdentityProvider.google
+        )
+    )
+    db.commit()
+
+    resolved = resolve_user(db, _claims(sub, email, verified=True))
+    assert resolved.id == user.id
+    assert resolved.email == email
+    assert resolved.email_verified is True
+
+
 def test_google_email_merge(db: Session, cleanup):
     email = f"merge-{uuid.uuid4()}@example.com"
     google_sub = f"google-oauth2|{uuid.uuid4()}"

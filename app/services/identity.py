@@ -52,12 +52,33 @@ def _create_user_with_identity(
             return existing.user
         raise
     db.refresh(user)
+    return _user_with_identities(db, user.id)
+
+
+def _user_with_identities(db: Session, user_id: uuid.UUID) -> User:
     return (
         db.query(User)
         .options(joinedload(User.identities))
-        .filter(User.id == user.id)
+        .filter(User.id == user_id)
         .one()
     )
+
+
+def _backfill_email(db: Session, user: User, claims: TokenClaims) -> User:
+    if not claims.email:
+        return user
+    changed = False
+    if user.email is None:
+        user.email = claims.email
+        changed = True
+    if claims.email_verified and not user.email_verified:
+        user.email_verified = True
+        changed = True
+    if not changed:
+        return user
+    db.add(user)
+    db.commit()
+    return _user_with_identities(db, user.id)
 
 
 def resolve_user(db: Session, claims: TokenClaims) -> User:
@@ -69,7 +90,7 @@ def resolve_user(db: Session, claims: TokenClaims) -> User:
     """
     existing = _get_identity_by_sub(db, claims.sub)
     if existing is not None:
-        return existing.user
+        return _backfill_email(db, existing.user, claims)
 
     provider_value = provider_from_sub(claims.sub)
     provider = IdentityProvider(provider_value)
@@ -100,12 +121,7 @@ def resolve_user(db: Session, claims: TokenClaims) -> User:
                 if raced is not None:
                     return raced.user
                 raise
-            return (
-                db.query(User)
-                .options(joinedload(User.identities))
-                .filter(User.id == matched.id)
-                .one()
-            )
+            return _user_with_identities(db, matched.id)
 
     return _create_user_with_identity(
         db,

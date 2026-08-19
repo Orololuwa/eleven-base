@@ -34,6 +34,59 @@ def _get_jwks_client() -> PyJWKClient:
     return _jwks_cache["jwks_client"]
 
 
+def _claim_value(payload: dict, *keys: str):
+    for key in keys:
+        if not key:
+            continue
+        value = payload.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def profile_from_payload(payload: dict) -> tuple[str | None, bool]:
+    """Read email from standard or Auth0-namespaced access-token claims."""
+    audience = settings.auth0_audience.rstrip("/")
+    email = _claim_value(
+        payload,
+        "email",
+        f"{audience}/email" if audience else "",
+    )
+    if not isinstance(email, str) or not email.strip():
+        # Fallback: any namespaced */email claim Auth0 Actions typically set.
+        email = next(
+            (
+                value
+                for key, value in payload.items()
+                if isinstance(key, str)
+                and key.endswith("/email")
+                and isinstance(value, str)
+                and value.strip()
+            ),
+            None,
+        )
+    if isinstance(email, str):
+        email = email.strip() or None
+    else:
+        email = None
+
+    verified = _claim_value(
+        payload,
+        "email_verified",
+        f"{audience}/email_verified" if audience else "",
+    )
+    if verified is None:
+        verified = next(
+            (
+                value
+                for key, value in payload.items()
+                if isinstance(key, str) and key.endswith("/email_verified")
+            ),
+            False,
+        )
+    return email, bool(verified)
+
+
 def provider_from_sub(auth0_sub: str) -> str:
     """Map Auth0 sub prefix to IdentityProvider value."""
     prefix = auth0_sub.split("|", 1)[0]
@@ -102,10 +155,5 @@ def verify_token(token: str) -> TokenClaims:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    email = payload.get("email")
-    if email is not None and not isinstance(email, str):
-        email = None
-
-    email_verified = bool(payload.get("email_verified", False))
-
+    email, email_verified = profile_from_payload(payload)
     return TokenClaims(sub=sub, email=email, email_verified=email_verified)
