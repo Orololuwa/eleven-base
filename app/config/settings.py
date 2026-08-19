@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -11,8 +11,11 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
 
-    class Config:
-        env_file = ".env"
+    auth0_domain: str = ""
+    auth0_audience: str = ""
+    auth0_algorithms: str = "RS256"
+
+    model_config = SettingsConfigDict(env_file=".env")
 
     @property
     def database_url(self) -> str:
@@ -20,6 +23,18 @@ class Settings(BaseSettings):
             f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def auth0_issuer(self) -> str:
+        return f"https://{self.auth0_domain}/"
+
+    @property
+    def auth0_jwks_url(self) -> str:
+        return f"https://{self.auth0_domain}/.well-known/jwks.json"
+
+    @property
+    def auth0_algorithms_list(self) -> list[str]:
+        return [a.strip() for a in self.auth0_algorithms.split(",") if a.strip()]
 
 
 settings = Settings()
