@@ -10,6 +10,7 @@ from app.config.database import Base
 
 if TYPE_CHECKING:
     from app.models.identity import UserIdentity
+    from app.modules.profiles.models import PlayerProfile
 
 
 class User(Base):
@@ -32,4 +33,10 @@ class User(Base):
 
     identities: Mapped[list["UserIdentity"]] = relationship(
         "UserIdentity", back_populates="user", cascade="all, delete-orphan"
+    )
+    profile: Mapped["PlayerProfile | None"] = relationship(
+        "PlayerProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

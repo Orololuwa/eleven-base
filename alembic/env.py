@@ -5,7 +5,13 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.config.database import Base
 from app.config.settings import settings
-from app.models import IdentityProvider, User, UserIdentity  # noqa: F401
+from app.models import (  # noqa: F401
+    IdentityProvider,
+    PlayerPosition,
+    PlayerProfile,
+    User,
+    UserIdentity,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

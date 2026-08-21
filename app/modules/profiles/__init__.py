@@ -1,5 +1,3 @@
-from app.models.identity import IdentityProvider, UserIdentity
-from app.models.user import User
 from app.modules.profiles.models import (
     PlayerPosition,
     PlayerProfile,
@@ -8,15 +6,14 @@ from app.modules.profiles.models import (
     ProfileVisibility,
     SkillLevel,
 )
+from app.modules.profiles.router import router
 
 __all__ = [
-    "User",
-    "UserIdentity",
-    "IdentityProvider",
     "PlayerProfile",
     "PlayerPosition",
-    "PreferredFoot",
-    "SkillLevel",
-    "ProfileVisibility",
     "PositionCode",
+    "PreferredFoot",
+    "ProfileVisibility",
+    "SkillLevel",
+    "router",
 ]

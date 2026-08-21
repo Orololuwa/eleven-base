@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth.jwt import TokenClaims, provider_from_sub
 from app.models.identity import IdentityProvider, UserIdentity
 from app.models.user import User
+from app.modules.profiles.service import get_or_create_profile
 
 
 def _get_identity_by_sub(db: Session, auth0_sub: str) -> UserIdentity | None:
@@ -52,6 +53,8 @@ def _create_user_with_identity(
             return existing.user
         raise
     db.refresh(user)
+    user = _user_with_identities(db, user.id)
+    get_or_create_profile(db, user)
     return _user_with_identities(db, user.id)
 
 
