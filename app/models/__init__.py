@@ -1,6 +1,5 @@
 from app.models.identity import IdentityProvider, UserIdentity
-from app.models.user import User
-from app.modules.profiles.models import (
+from app.models.profile import (
     PlayerPosition,
     PlayerProfile,
     PositionCode,
@@ -8,6 +7,7 @@ from app.modules.profiles.models import (
     ProfileVisibility,
     SkillLevel,
 )
+from app.models.user import User
 
 __all__ = [
     "User",

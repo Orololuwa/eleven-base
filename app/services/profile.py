@@ -7,14 +7,13 @@ from geoalchemy2.shape import to_shape
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from app.models.user import User
-from app.modules.profiles import cloudinary_client
-from app.modules.profiles.models import (
+from app.models.profile import (
     PlayerPosition,
     PlayerProfile,
     ProfileVisibility,
 )
-from app.modules.profiles.schemas import (
+from app.models.user import User
+from app.schemas.profile import (
     AvatarConfirmIn,
     AvatarSignatureOut,
     LocationOut,
@@ -24,6 +23,7 @@ from app.modules.profiles.schemas import (
     ProfileReadPublic,
     ProfileUpdate,
 )
+from app.services import cloudinary_client
 
 
 def _location_to_out(location) -> LocationOut | None:

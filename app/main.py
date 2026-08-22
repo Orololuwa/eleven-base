@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 
 from app.config.settings import settings
-from app.modules.profiles.router import router as profiles_router
 from app.routes.base import router as base_router
 from app.routes.me import router as me_router
+from app.routes.profiles import router as profiles_router
 
 app = FastAPI(
     title=settings.app_name,

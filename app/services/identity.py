@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth.jwt import TokenClaims, provider_from_sub
 from app.models.identity import IdentityProvider, UserIdentity
 from app.models.user import User
-from app.modules.profiles.service import get_or_create_profile
+from app.services.profile import get_or_create_profile
 
 
 def _get_identity_by_sub(db: Session, auth0_sub: str) -> UserIdentity | None:

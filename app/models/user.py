@@ -10,7 +10,7 @@ from app.config.database import Base
 
 if TYPE_CHECKING:
     from app.models.identity import UserIdentity
-    from app.modules.profiles.models import PlayerProfile
+    from app.models.profile import PlayerProfile
 
 
 class User(Base):

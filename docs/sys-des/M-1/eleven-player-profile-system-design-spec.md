@@ -108,16 +108,16 @@ erDiagram
 
 ## 3. Backend (FastAPI)
 
-### 3.1 Module structure
+### 3.1 Layout (layered, not a feature package)
 
 ```
-app/modules/profiles/
-├── models.py     # SQLAlchemy: PlayerProfile, PlayerPosition
-├── schemas.py     # Pydantic: ProfileUpdate, ProfileRead, ProfileReadPublic,
-│                   #           PositionSetIn, PositionOut, AvatarSignatureOut
-├── service.py      # get_or_create_profile, update_profile, replace_positions,
-│                    # get_avatar_signature, confirm_avatar, delete_avatar
-└── router.py        # depends on get_current_user from the auth module
+app/models/profile.py     # SQLAlchemy: PlayerProfile, PlayerPosition
+app/schemas/profile.py    # Pydantic: ProfileUpdate, ProfileRead, ProfileReadPublic,
+                          #           PositionSetIn, PositionOut, AvatarSignatureOut
+app/services/profile.py   # get_or_create_profile, update_profile, replace_positions,
+                          # get_avatar_signature, confirm_avatar, delete_avatar
+app/services/cloudinary_client.py
+app/routes/profiles.py    # depends on get_current_user from app.auth
 ```
 
 ### 3.2 API endpoints

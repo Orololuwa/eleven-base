@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.modules.profiles.models import (
+from app.models.profile import (
     PositionCode,
     PreferredFoot,
     ProfileVisibility,

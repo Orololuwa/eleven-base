@@ -7,18 +7,18 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.config.database import SessionLocal
-from app.models.user import User
-from app.modules.profiles.models import (
+from app.models.profile import (
     PlayerProfile,
     PositionCode,
     ProfileVisibility,
 )
-from app.modules.profiles.schemas import (
+from app.models.user import User
+from app.schemas.profile import (
     AvatarConfirmIn,
     PositionSetIn,
     ProfileUpdate,
 )
-from app.modules.profiles.service import (
+from app.services.profile import (
     confirm_avatar,
     delete_avatar,
     get_or_create_profile,
@@ -257,7 +257,7 @@ def test_confirm_and_delete_avatar(db: Session, cleanup):
     assert confirmed.avatar_url is not None
     assert confirmed.avatar_updated_at is not None
 
-    with patch("app.modules.profiles.cloudinary_client.destroy_asset") as destroy:
+    with patch("app.services.profile.cloudinary_client.destroy_asset") as destroy:
         delete_avatar(db, user)
         destroy.assert_called_once_with("eleven/avatars/x")
 
