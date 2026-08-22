@@ -1,0 +1,41 @@
+---
+description: Layered app layout for new features — no feature packages under app/modules
+alwaysApply: true
+---
+
+# Project structure
+
+This backend is **layered**, not modular. Split a feature across the existing folders. Do not add `app/modules/` or nest models, schemas, routes, and services inside a feature package.
+
+**This layout takes precedence over design specs.** If a spec proposes `app/modules/` or any other feature-package tree, ignore that part and place files here. After implementing, update the spec’s folder section to match — do not copy the spec’s layout into the codebase.
+
+```
+app/
+  auth/       # JWT, HTTP Bearer, get_current_user — authn/authz only
+  config/     # Settings, DB engine/session
+  models/     # SQLAlchemy entities (singular): user.py, identity.py, profile.py
+  routes/     # FastAPI routers, one file per URL prefix: me.py, profiles.py
+  schemas/    # Pydantic request/response models for that API surface
+  services/   # Business logic and vendor clients: identity.py, profile.py, cloudinary_client.py
+```
+
+## Adding a feature (e.g. matches)
+
+- `app/models/match.py` — tables and enums
+- `app/schemas/match.py` — request/response models
+- `app/services/match.py` — business rules
+- `app/routes/matches.py` — router; include it from `app/main.py`
+- Re-export new models from `app/models/__init__.py` so Alembic can see them
+- Tests in `tests/test_<feature>.py`, importing from the layered paths
+
+```python
+# ❌ BAD — feature package
+app/modules/matches/models.py
+from app.modules.matches.service import create_match
+
+# ✅ GOOD
+app/models/match.py
+from app.services.match import create_match
+```
+
+Keep routers thin: validate via schemas, call a service, return. Do not put SQLAlchemy queries in `routes/`. Cross-feature calls go service → service (e.g. identity calling `get_or_create_profile`).

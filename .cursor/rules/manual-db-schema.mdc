@@ -1,0 +1,34 @@
+---
+description: Schema changes are manual Alembic only — never auto-migrate, create_all, or run tests unasked
+alwaysApply: true
+---
+
+# Manual database schema
+
+Schema is applied **only** by a human via Alembic. The app, tests, and the agent must never create or alter tables.
+
+## Do not
+
+- Call `Base.metadata.create_all` / `drop_all` (app startup, tests, scripts, notebooks)
+- Run `alembic upgrade`, `downgrade`, `revision`, or `alembic revision --autogenerate`
+- Add FastAPI lifespan/startup hooks that migrate or create tables
+- Add pytest fixtures/plugins that create tables so tests can pass
+- Run `pytest` or any test suite unless the user **explicitly** asks — tests use the real DB (`SessionLocal` / `.env`) and must not be a side effect of implementation
+
+```python
+# ❌ BAD
+Base.metadata.create_all(bind=engine)
+
+# ❌ BAD — agent running this unasked
+alembic upgrade head
+pytest
+
+# ✅ GOOD — change models, then tell the user to migrate
+# alembic revision --autogenerate -m "describe change"
+# alembic upgrade head
+# pytest   # only after the user asks, and only after they have migrated
+```
+
+## After a model change
+
+Write the SQLAlchemy model and re-export it from `app/models/__init__.py`. Stop there. Tell the user to generate, review, and apply the revision themselves. Do not generate or apply it for them unless they explicitly ask.
