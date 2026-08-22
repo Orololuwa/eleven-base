@@ -1,0 +1,54 @@
+---
+description: FastAPI / Python stack — prefer these libraries and patterns for API, auth, DB, validation, geo, and uploads
+alwaysApply: true
+---
+
+# FastAPI / Python stack
+
+Prefer this repo's existing stack over whatever a spec names. Check `requirements.txt` before adding a package.
+
+## HTTP API
+
+FastAPI + uvicorn. Thin routers in `app/routes/`: `APIRouter`, `Annotated[..., Depends(...)]`, `response_model`. Include new routers in `app/main.py`. No SQLAlchemy queries in routes — call a service and return.
+
+## Config
+
+`pydantic-settings` `Settings` in `app/config/settings.py` (reads `.env`). New env flags and secrets go there as fields, not `os.environ` scattered in code.
+
+## Auth
+
+Auth0 RS256 access tokens via PyJWT + JWKS (`app/auth/jwt.py`, `httpx`, `cachetools` TTLCache). Protect routes with `get_current_user` (`HTTPBearer` in `app/auth/dependencies.py`). Create / merge / link users in `app/services/identity.py`. Do not add session cookies, a second IdP SDK, or a custom JWT stack.
+
+## Validation
+
+Pydantic v2 models in `app/schemas/`. `ConfigDict(from_attributes=True)` for ORM reads. Constraints via `Field` and `model_validator`. Reuse model enums in schemas. Invalid input is 422.
+
+## ORM and Postgres
+
+SQLAlchemy 2.0 (`Mapped` / `mapped_column`) on `Base` from `app/config/database.py`. Driver: `psycopg2`. UUID PKs (`postgresql.UUID(as_uuid=True)`). Sessions via `get_db`. Queries and commits live in `app/services/`. Re-export new models from `app/models/__init__.py`.
+
+## Migrations
+
+Alembic, applied by a human. Follow [`.cursor/rules/manual-db-schema.mdc`](.cursor/rules/manual-db-schema.mdc). Never `Base.metadata.create_all`.
+
+## Geo
+
+GeoAlchemy2 `Geography(geometry_type="POINT", srid=4326)` to store; Shapely `to_shape` to read; `WKTElement` to write. Do not add another GIS library.
+
+## Uploads / images
+
+Cloudinary signed client upload via `app/services/cloudinary_client.py`: sign → client uploads → confirm `public_id` / `secure_url` on the model → `destroy` on delete. Do not add S3, local disk, or another CDN.
+
+## HTTP out and errors
+
+Outbound HTTP: `httpx` (already used for JWKS). Do not add `requests`.
+
+Errors: `HTTPException` with explicit `status` codes. 401 for auth, 404 to hide missing/private resources, 409 for identity conflicts, 422 for business-rule validation, 500 when a required vendor is unconfigured.
+
+## Tests
+
+pytest. DB tests use real `SessionLocal` (the `.env` database). Do not run pytest unless the user explicitly asks.
+
+## Naming
+
+Files: snake_case by layer (`profile.py`, `identity.py`). Route files match the URL prefix (`me.py`, `profiles.py`). Functions are verbs (`resolve_user`, `get_or_create_profile`). Schemas follow `*In` / `*Out` / `*Read` / `*Update`.

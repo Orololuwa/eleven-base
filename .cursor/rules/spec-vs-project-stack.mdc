@@ -1,0 +1,38 @@
+---
+description: When implementing from system design specs or PRDs or whatever, prefer the project's existing packages and patterns over whatever the spec names — unless that capability is not already in the repo.
+alwaysApply: true
+---
+
+# Spec stack vs project stack
+
+Specs describe product behavior. They are not a shopping list of packages.
+
+Treat named libraries, frameworks, ORMs, auth providers, and storage backends in a spec as **suggestions**. The repo's existing setup wins.
+
+## Precedence
+
+1. Use what is already in `requirements.txt` and established patterns in `app/`.
+2. Map the spec's intent onto those existing tools (same behavior, different implementation).
+3. Add a new package **only** when the project has no equivalent for that capability.
+4. If the user explicitly names a library in the conversation, that overrides this rule.
+
+Folder layout is owned by [`.cursor/rules/project-structure.mdc`](.cursor/rules/project-structure.mdc), not by the spec.
+
+Do not mention the skipped spec library in plans or code comments unless the user asks.
+
+## Keep coding rules in sync
+
+When you add a dependency (or adopt a stack pattern) that becomes the project default for a capability — auth, ORM, uploads, geo, HTTP client, etc. — update [`.cursor/rules/fastapi_py.mdc`](.cursor/rules/fastapi_py.mdc) in the **same change**.
+
+- Put FastAPI / Python stack guidance (what to prefer for each operation, what not to invent, where it lives) in `fastapi_py.mdc`.
+- Keep additions short: what to prefer, what not to invent, and where it lives.
+- Do this automatically; do not wait for the user to ask.
+
+## Examples
+
+- Spec says Tortoise or Prisma and the app already uses SQLAlchemy 2.0 → use SQLAlchemy.
+- Spec says "upload to S3" and avatars already go through Cloudinary → extend `app/services/cloudinary_client.py`. Do not add boto3.
+- Spec says Auth0 and JWTs are already verified in `app/auth/jwt.py` → keep that path. Do not add a second IdP SDK.
+- Spec names a package that is now required and has no existing equivalent → add it to `requirements.txt`, then document that path in `fastapi_py.mdc`.
+
+Check `requirements.txt` and `app/` before proposing a new dependency.
