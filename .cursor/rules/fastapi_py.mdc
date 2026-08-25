@@ -33,7 +33,7 @@ Alembic, applied by a human. Follow [`.cursor/rules/manual-db-schema.mdc`](.curs
 
 ## Geo
 
-GeoAlchemy2 `Geography(geometry_type="POINT", srid=4326)` to store; Shapely `to_shape` to read; `WKTElement` to write. Do not add another GIS library.
+GeoAlchemy2 `Geography(geometry_type="POINT", srid=4326)` to store; Shapely `to_shape` to read; `WKTElement` to write. Spatial matching builds a convex hull from corner points (`ST_ConvexHull(ST_Collect(...))`) and uses `ST_DWithin` / `ST_Intersects` with meter distances on `Geography`. Do not add another GIS library.
 
 ## Uploads / images
 

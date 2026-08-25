@@ -6,11 +6,19 @@ from alembic import context
 from app.config.database import Base
 from app.config.settings import settings
 from app.models import (  # noqa: F401
+    AttackDirection,
     IdentityProvider,
+    Pitch,
+    PitchVisibility,
     PlayerPosition,
     PlayerProfile,
+    PlaySession,
+    PlayStructure,
+    SessionSegment,
+    SessionType,
     User,
     UserIdentity,
+    UserSavedPitch,
 )
 
 config = context.config

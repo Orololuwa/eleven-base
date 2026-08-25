@@ -1,4 +1,5 @@
 from app.models.identity import IdentityProvider, UserIdentity
+from app.models.pitch import Pitch, PitchVisibility, UserSavedPitch
 from app.models.profile import (
     PlayerPosition,
     PlayerProfile,
@@ -6,6 +7,13 @@ from app.models.profile import (
     PreferredFoot,
     ProfileVisibility,
     SkillLevel,
+)
+from app.models.session import (
+    AttackDirection,
+    PlaySession,
+    PlayStructure,
+    SessionSegment,
+    SessionType,
 )
 from app.models.user import User
 
@@ -19,4 +27,12 @@ __all__ = [
     "SkillLevel",
     "ProfileVisibility",
     "PositionCode",
+    "Pitch",
+    "PitchVisibility",
+    "UserSavedPitch",
+    "PlaySession",
+    "SessionSegment",
+    "SessionType",
+    "PlayStructure",
+    "AttackDirection",
 ]

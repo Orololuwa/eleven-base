@@ -10,7 +10,9 @@ from app.config.database import Base
 
 if TYPE_CHECKING:
     from app.models.identity import UserIdentity
+    from app.models.pitch import Pitch, UserSavedPitch
     from app.models.profile import PlayerProfile
+    from app.models.session import PlaySession
 
 
 class User(Base):
@@ -38,5 +40,18 @@ class User(Base):
         "PlayerProfile",
         back_populates="user",
         uselist=False,
+        cascade="all, delete-orphan",
+    )
+    created_pitches: Mapped[list["Pitch"]] = relationship(
+        "Pitch", back_populates="created_by"
+    )
+    saved_pitches: Mapped[list["UserSavedPitch"]] = relationship(
+        "UserSavedPitch",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    play_sessions: Mapped[list["PlaySession"]] = relationship(
+        "PlaySession",
+        back_populates="user",
         cascade="all, delete-orphan",
     )

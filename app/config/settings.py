@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     cloudinary_api_key: str = ""
     cloudinary_api_secret: str = ""
 
+    pitch_nearby_radius_meters: float = 250.0
+    pitch_similar_centroid_meters: float = 15.0
+    pitch_suggest_limit: int = 5
+
     model_config = SettingsConfigDict(env_file=".env")
 
     @property
