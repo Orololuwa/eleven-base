@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.config.database import get_db
 from app.models.user import User
-from app.schemas.session import SessionCreateIn, SessionRead, SessionStartIn
+from app.schemas.session import (
+    SessionCreateIn,
+    SessionFinalizeIn,
+    SessionRead,
+    SessionStartIn,
+    TrackPointsIn,
+    TrackPointsOut,
+)
 from app.services import session as session_service
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -30,3 +37,23 @@ def post_start_session(
     db: Annotated[Session, Depends(get_db)],
 ) -> SessionRead:
     return session_service.start_session(db, user, session_id, body)
+
+
+@router.post("/{session_id}/finalize", response_model=SessionRead)
+def post_finalize_session(
+    session_id: UUID,
+    body: SessionFinalizeIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SessionRead:
+    return session_service.finalize_session(db, user, session_id, body)
+
+
+@router.post("/{session_id}/track-points", response_model=TrackPointsOut)
+def post_track_points(
+    session_id: UUID,
+    body: TrackPointsIn,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TrackPointsOut:
+    return session_service.upload_track_points(db, user, session_id, body)

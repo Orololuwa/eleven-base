@@ -10,9 +10,12 @@ from app.models.profile import (
 )
 from app.models.session import (
     AttackDirection,
+    PauseReason,
     PlaySession,
     PlayStructure,
+    SessionPause,
     SessionSegment,
+    SessionTrackPoint,
     SessionType,
 )
 from app.models.user import User
@@ -32,7 +35,10 @@ __all__ = [
     "UserSavedPitch",
     "PlaySession",
     "SessionSegment",
+    "SessionPause",
+    "SessionTrackPoint",
     "SessionType",
     "PlayStructure",
     "AttackDirection",
+    "PauseReason",
 ]
