@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.config.database import SessionLocal
 from app.models.pitch import Pitch, PitchVisibility, UserSavedPitch
 from app.models.session import (
+    ActivityKind,
     AttackDirection,
     PlaySession,
     PlayStructure,
@@ -127,15 +128,17 @@ def test_halves_requires_segment_length():
         SessionCreateIn(
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
+            extra_time_enabled=False,
         )
 
 
-def test_open_rejects_segment_length():
+def test_training_activities_rejects_segment_length():
     with pytest.raises(ValidationError):
         SessionCreateIn(
             session_type=SessionType.training,
-            play_structure=PlayStructure.open,
+            play_structure=PlayStructure.training_activities,
             planned_segment_length_minutes=20,
+            training_activity_options=[ActivityKind.run],
         )
 
 
@@ -158,8 +161,125 @@ def test_halves_accepts_length():
         session_type=SessionType.match,
         play_structure=PlayStructure.halves,
         planned_segment_length_minutes=45,
+        extra_time_enabled=False,
     )
     assert data.planned_segment_length_minutes == 45
+    assert data.extra_time_enabled is False
+
+
+def test_match_rejects_non_halves_structure():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.match,
+            play_structure=PlayStructure.sets,
+            planned_segment_length_minutes=15,
+        )
+
+
+def test_futsal_rejects_training_activities():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.futsal,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run],
+        )
+
+
+def test_training_rejects_halves():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.halves,
+            planned_segment_length_minutes=45,
+            extra_time_enabled=False,
+        )
+
+
+def test_halves_requires_extra_time_enabled():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.match,
+            play_structure=PlayStructure.halves,
+            planned_segment_length_minutes=45,
+        )
+
+
+def test_extra_time_length_required_when_enabled():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.match,
+            play_structure=PlayStructure.halves,
+            planned_segment_length_minutes=45,
+            extra_time_enabled=True,
+        )
+
+
+def test_extra_time_accepted_when_enabled():
+    data = SessionCreateIn(
+        session_type=SessionType.match,
+        play_structure=PlayStructure.halves,
+        planned_segment_length_minutes=45,
+        extra_time_enabled=True,
+        planned_extra_time_segment_length_minutes=15,
+    )
+    assert data.planned_extra_time_segment_length_minutes == 15
+
+
+def test_extra_time_rejected_for_sets():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.futsal,
+            play_structure=PlayStructure.sets,
+            extra_time_enabled=True,
+            planned_extra_time_segment_length_minutes=10,
+        )
+
+
+def test_training_requires_activity_options():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+        )
+
+
+def test_training_rejects_empty_activity_options():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[],
+        )
+
+
+def test_training_rejects_duplicate_activity_options():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run, ActivityKind.run],
+        )
+
+
+def test_training_pitch_requires_set_option():
+    with pytest.raises(ValidationError):
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run, ActivityKind.drill],
+            pitch_id=uuid.uuid4(),
+        )
+
+
+def test_training_pitch_allowed_with_set_option():
+    pitch_id = uuid.uuid4()
+    data = SessionCreateIn(
+        session_type=SessionType.training,
+        play_structure=PlayStructure.training_activities,
+        training_activity_options=[ActivityKind.set],
+        pitch_id=pitch_id,
+    )
+    assert data.pitch_id == pitch_id
 
 
 # --- Service tests (require migrated DB + PostGIS) ---
@@ -174,12 +294,14 @@ def test_create_session_pre_kickoff(db: Session, cleanup):
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
             planned_segment_length_minutes=45,
+            extra_time_enabled=False,
         ),
     )
     cleanup(session_id=created.id)
 
     assert created.started_at is None
     assert created.pitch_id is None
+    assert created.extra_time_enabled is False
     assert created.segments == []
 
 
@@ -195,7 +317,7 @@ def test_create_session_with_pitch_auto_saves(db: Session, cleanup):
         db,
         user,
         SessionCreateIn(
-            session_type=SessionType.match,
+            session_type=SessionType.futsal,
             play_structure=PlayStructure.sets,
             planned_segment_length_minutes=15,
             pitch_id=pitch.id,
@@ -218,31 +340,156 @@ def test_create_session_rejects_invisible_pitch(db: Session, cleanup):
             db,
             user,
             SessionCreateIn(
-                session_type=SessionType.match,
-                play_structure=PlayStructure.open,
+                session_type=SessionType.training,
+                play_structure=PlayStructure.training_activities,
+                training_activity_options=[ActivityKind.set],
                 pitch_id=pitch.id,
             ),
         )
     assert exc.value.status_code == 404
 
 
-def test_start_open_creates_no_segment(db: Session, cleanup):
+def test_start_training_creates_segment_with_activity_kind(db: Session, cleanup):
     user = _make_user(db, cleanup)
     created = session_service.create_session(
         db,
         user,
         SessionCreateIn(
             session_type=SessionType.training,
-            play_structure=PlayStructure.open,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run, ActivityKind.drill],
         ),
     )
     cleanup(session_id=created.id)
 
     started = session_service.start_session(
-        db, user, created.id, SessionStartIn()
+        db,
+        user,
+        created.id,
+        SessionStartIn(activity_kind=ActivityKind.drill),
     )
     assert started.started_at is not None
-    assert started.segments == []
+    assert len(started.segments) == 1
+    assert started.segments[0].segment_index == 1
+    assert started.segments[0].activity_kind == ActivityKind.drill
+    assert started.segments[0].attack_direction is None
+
+
+def test_start_training_requires_activity_kind(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    created = session_service.create_session(
+        db,
+        user,
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run],
+        ),
+    )
+    cleanup(session_id=created.id)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.start_session(db, user, created.id, SessionStartIn())
+    assert exc.value.status_code == 422
+
+
+def test_start_training_rejects_activity_kind_not_in_options(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    created = session_service.create_session(
+        db,
+        user,
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run],
+        ),
+    )
+    cleanup(session_id=created.id)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.start_session(
+            db,
+            user,
+            created.id,
+            SessionStartIn(activity_kind=ActivityKind.set),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_start_training_set_with_pitch_requires_attack_direction(
+    db: Session, cleanup
+):
+    user = _make_user(db, cleanup)
+    pitch = _make_pitch(db, user, cleanup)
+    created = session_service.create_session(
+        db,
+        user,
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.set, ActivityKind.run],
+            pitch_id=pitch.id,
+        ),
+    )
+    cleanup(session_id=created.id)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.start_session(
+            db,
+            user,
+            created.id,
+            SessionStartIn(activity_kind=ActivityKind.set),
+        )
+    assert exc.value.status_code == 422
+
+    started = session_service.start_session(
+        db,
+        user,
+        created.id,
+        SessionStartIn(
+            activity_kind=ActivityKind.set,
+            attack_direction=AttackDirection.end_a,
+        ),
+    )
+    assert started.segments[0].activity_kind == ActivityKind.set
+    assert started.segments[0].attack_direction == AttackDirection.end_a
+
+
+def test_start_training_run_with_pitch_omits_attack_direction(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    pitch = _make_pitch(db, user, cleanup)
+    created = session_service.create_session(
+        db,
+        user,
+        SessionCreateIn(
+            session_type=SessionType.training,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.set, ActivityKind.run],
+            pitch_id=pitch.id,
+        ),
+    )
+    cleanup(session_id=created.id)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.start_session(
+            db,
+            user,
+            created.id,
+            SessionStartIn(
+                activity_kind=ActivityKind.run,
+                attack_direction=AttackDirection.end_a,
+            ),
+        )
+    assert exc.value.status_code == 422
+
+    started = session_service.start_session(
+        db,
+        user,
+        created.id,
+        SessionStartIn(activity_kind=ActivityKind.run),
+    )
+    assert started.segments[0].activity_kind == ActivityKind.run
+    assert started.segments[0].attack_direction is None
 
 
 def test_start_skip_pitch_segment_null_attack(db: Session, cleanup):
@@ -254,6 +501,7 @@ def test_start_skip_pitch_segment_null_attack(db: Session, cleanup):
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
             planned_segment_length_minutes=45,
+            extra_time_enabled=False,
         ),
     )
     cleanup(session_id=created.id)
@@ -278,6 +526,8 @@ def test_start_with_pitch_requires_attack_direction(db: Session, cleanup):
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
             planned_segment_length_minutes=45,
+            extra_time_enabled=True,
+            planned_extra_time_segment_length_minutes=15,
             pitch_id=pitch.id,
         ),
     )
@@ -295,6 +545,7 @@ def test_start_with_pitch_requires_attack_direction(db: Session, cleanup):
     )
     assert len(started.segments) == 1
     assert started.segments[0].attack_direction == AttackDirection.end_a
+    assert created.extra_time_enabled is True
 
 
 def test_double_start_conflict(db: Session, cleanup):
@@ -304,14 +555,19 @@ def test_double_start_conflict(db: Session, cleanup):
         user,
         SessionCreateIn(
             session_type=SessionType.training,
-            play_structure=PlayStructure.open,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run],
         ),
     )
     cleanup(session_id=created.id)
 
-    session_service.start_session(db, user, created.id, SessionStartIn())
+    session_service.start_session(
+        db, user, created.id, SessionStartIn(activity_kind=ActivityKind.run)
+    )
     with pytest.raises(HTTPException) as exc:
-        session_service.start_session(db, user, created.id, SessionStartIn())
+        session_service.start_session(
+            db, user, created.id, SessionStartIn(activity_kind=ActivityKind.run)
+        )
     assert exc.value.status_code == 409
 
 
@@ -323,11 +579,14 @@ def test_start_other_users_session_404(db: Session, cleanup):
         owner,
         SessionCreateIn(
             session_type=SessionType.training,
-            play_structure=PlayStructure.open,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=[ActivityKind.run],
         ),
     )
     cleanup(session_id=created.id)
 
     with pytest.raises(HTTPException) as exc:
-        session_service.start_session(db, other, created.id, SessionStartIn())
+        session_service.start_session(
+            db, other, created.id, SessionStartIn(activity_kind=ActivityKind.run)
+        )
     assert exc.value.status_code == 404

@@ -25,7 +25,7 @@ Pydantic v2 models in `app/schemas/`. `ConfigDict(from_attributes=True)` for ORM
 
 ## ORM and Postgres
 
-SQLAlchemy 2.0 (`Mapped` / `mapped_column`) on `Base` from `app/config/database.py`. Driver: `psycopg2`. UUID PKs (`postgresql.UUID(as_uuid=True)`). Sessions via `get_db`. Queries and commits live in `app/services/`. Re-export new models from `app/models/__init__.py`.
+SQLAlchemy 2.0 (`Mapped` / `mapped_column`) on `Base` from `app/config/database.py`. Driver: `psycopg2`. UUID PKs (`postgresql.UUID(as_uuid=True)`). Sessions via `get_db`. Queries and commits live in `app/services/`. Re-export new models from `app/models/__init__.py`. Multi-value enums with no per-item metadata use `ARRAY(String)` (e.g. `training_activity_options`); join tables stay for rows that have their own attributes (`player_positions`).
 
 ## Migrations
 

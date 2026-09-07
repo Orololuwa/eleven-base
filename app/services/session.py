@@ -7,11 +7,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.session import (
+    ActivityKind,
     PlaySession,
     PlayStructure,
     SessionPause,
     SessionSegment,
     SessionTrackPoint,
+    SessionType,
 )
 from app.models.user import User
 from app.schemas.session import (
@@ -45,6 +47,7 @@ def _serialize_segment(segment: SessionSegment) -> SessionSegmentOut:
         id=segment.id,
         session_id=segment.session_id,
         segment_index=segment.segment_index,
+        activity_kind=segment.activity_kind,
         attack_direction=segment.attack_direction,
         started_at=segment.started_at,
         ended_at=segment.ended_at,
@@ -58,6 +61,11 @@ def _serialize_session(session: PlaySession) -> SessionRead:
         session_type=session.session_type,
         play_structure=session.play_structure,
         planned_segment_length_minutes=session.planned_segment_length_minutes,
+        extra_time_enabled=session.extra_time_enabled,
+        planned_extra_time_segment_length_minutes=(
+            session.planned_extra_time_segment_length_minutes
+        ),
+        training_activity_options=session.training_activity_options,
         pitch_id=session.pitch_id,
         created_at=session.created_at,
         started_at=session.started_at,
@@ -101,38 +109,53 @@ def _validate_closed_interval(
         )
 
 
+def _attack_direction_required(
+    play_session: PlaySession, activity_kind: ActivityKind | None
+) -> bool:
+    if play_session.pitch_id is None:
+        return False
+    if play_session.session_type == SessionType.training:
+        return activity_kind == ActivityKind.set
+    return True
+
+
 def _validate_attack_direction(
     play_session: PlaySession,
     attack_direction: object | None,
     label: str,
+    activity_kind: ActivityKind | None = None,
 ) -> None:
-    if play_session.pitch_id is not None and attack_direction is None:
+    required = _attack_direction_required(play_session, activity_kind)
+    if required and attack_direction is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"{label} attack_direction is required when the session has a pitch",
         )
-    if play_session.pitch_id is None and attack_direction is not None:
+    if not required and attack_direction is not None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"{label} attack_direction must be omitted when heatmap was skipped",
+            detail=(
+                f"{label} attack_direction must be omitted when heatmap was skipped "
+                "or the segment does not use attack direction"
+            ),
         )
+
+
+def _training_options(play_session: PlaySession) -> set[ActivityKind]:
+    options = play_session.training_activity_options or []
+    return {
+        ActivityKind(option) if not isinstance(option, ActivityKind) else option
+        for option in options
+    }
 
 
 def _validate_segments(
     play_session: PlaySession, segments: list[FinalizeSegmentIn]
 ) -> None:
-    if play_session.play_structure == PlayStructure.open:
-        if segments:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="segments must be empty for open play structure",
-            )
-        return
-
     if not segments:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="segments are required for halves and sets play structures",
+            detail="segments are required",
         )
 
     indexes = [segment.segment_index for segment in segments]
@@ -143,15 +166,55 @@ def _validate_segments(
             detail="segment_index values must be contiguous starting at 1",
         )
 
+    if play_session.play_structure == PlayStructure.halves:
+        max_segments = 4 if play_session.extra_time_enabled else 2
+        if len(segments) > max_segments:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"halves sessions allow at most {max_segments} segments "
+                    f"(extra_time_enabled={play_session.extra_time_enabled})"
+                ),
+            )
+
+    allowed_kinds = _training_options(play_session)
     ordered = sorted(segments, key=lambda segment: segment.segment_index)
     for segment in ordered:
         _validate_closed_interval(
             segment.started_at, segment.ended_at, f"segment {segment.segment_index}"
         )
+
+        if play_session.play_structure == PlayStructure.training_activities:
+            if segment.activity_kind is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"segment {segment.segment_index} activity_kind is required "
+                        "for training_activities"
+                    ),
+                )
+            if segment.activity_kind not in allowed_kinds:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"segment {segment.segment_index} activity_kind must be one of "
+                        "the session's training_activity_options"
+                    ),
+                )
+        elif segment.activity_kind is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"segment {segment.segment_index} activity_kind must be omitted "
+                    "for match and futsal sessions"
+                ),
+            )
+
         _validate_attack_direction(
             play_session,
             segment.attack_direction,
             f"segment {segment.segment_index}",
+            activity_kind=segment.activity_kind,
         )
 
     for left, right in zip(ordered, ordered[1:]):
@@ -171,43 +234,20 @@ def _validate_pauses(
     pauses: list[FinalizePauseIn],
     session_ended_at: datetime,
 ) -> None:
+    _ = (play_session, session_ended_at)
     segment_windows: dict[int, tuple[datetime, datetime]] = {
         segment.segment_index: (segment.started_at, segment.ended_at)
         for segment in segments
     }
 
-    grouped: dict[int | None, list[FinalizePauseIn]] = {}
+    grouped: dict[int, list[FinalizePauseIn]] = {}
     for pause in pauses:
         _validate_closed_interval(pause.started_at, pause.ended_at, "pause")
-
-        if play_session.play_structure == PlayStructure.open:
-            if pause.segment_index is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="segment_index must be omitted for open play structure pauses",
-                )
-            if play_session.started_at is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="session has not started",
-                )
-            if pause.started_at < play_session.started_at:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="pause started_at must be within the session window",
-                )
-            if pause.ended_at > session_ended_at:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="pause ended_at must be within the session window",
-                )
-            grouped.setdefault(None, []).append(pause)
-            continue
 
         if pause.segment_index is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="segment_index is required for halves and sets pauses",
+                detail="segment_index is required for pauses",
             )
         window = segment_windows.get(pause.segment_index)
         if window is None:
@@ -252,12 +292,14 @@ def _upsert_segments(
             existing.started_at = segment.started_at
             existing.ended_at = segment.ended_at
             existing.attack_direction = segment.attack_direction
+            existing.activity_kind = segment.activity_kind
             db.add(existing)
         else:
             db.add(
                 SessionSegment(
                     session_id=play_session.id,
                     segment_index=segment.segment_index,
+                    activity_kind=segment.activity_kind,
                     attack_direction=segment.attack_direction,
                     started_at=segment.started_at,
                     ended_at=segment.ended_at,
@@ -289,6 +331,15 @@ def create_session(db: Session, user: User, data: SessionCreateIn) -> SessionRea
         session_type=data.session_type,
         play_structure=data.play_structure,
         planned_segment_length_minutes=data.planned_segment_length_minutes,
+        extra_time_enabled=data.extra_time_enabled,
+        planned_extra_time_segment_length_minutes=(
+            data.planned_extra_time_segment_length_minutes
+        ),
+        training_activity_options=(
+            [kind.value for kind in data.training_activity_options]
+            if data.training_activity_options is not None
+            else None
+        ),
         pitch_id=pitch_id,
     )
     db.add(play_session)
@@ -316,32 +367,50 @@ def start_session(
             detail="Session already started",
         )
 
-    if play_session.play_structure != PlayStructure.open:
-        if play_session.pitch_id is not None and data.attack_direction is None:
+    activity_kind: ActivityKind | None = None
+    if play_session.play_structure == PlayStructure.training_activities:
+        if data.activity_kind is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="attack_direction is required when the session has a pitch",
+                detail="activity_kind is required for training_activities",
             )
-        if play_session.pitch_id is None and data.attack_direction is not None:
+        if data.activity_kind not in _training_options(play_session):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="attack_direction must be omitted when heatmap was skipped",
+                detail="activity_kind must be one of the session's training_activity_options",
             )
+        activity_kind = data.activity_kind
+    elif data.activity_kind is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="activity_kind must be omitted for match and futsal sessions",
+        )
+
+    _validate_attack_direction(
+        play_session,
+        data.attack_direction,
+        "start",
+        activity_kind=activity_kind,
+    )
 
     now = datetime.now(timezone.utc)
     play_session.started_at = now
     db.add(play_session)
 
-    if play_session.play_structure != PlayStructure.open:
-        attack = data.attack_direction if play_session.pitch_id is not None else None
-        db.add(
-            SessionSegment(
-                session_id=play_session.id,
-                segment_index=1,
-                attack_direction=attack,
-                started_at=now,
-            )
+    attack = (
+        data.attack_direction
+        if _attack_direction_required(play_session, activity_kind)
+        else None
+    )
+    db.add(
+        SessionSegment(
+            session_id=play_session.id,
+            segment_index=1,
+            activity_kind=activity_kind,
+            attack_direction=attack,
+            started_at=now,
         )
+    )
 
     db.commit()
     loaded = _load_session(db, play_session.id)
@@ -383,13 +452,11 @@ def finalize_session(
     }
 
     for pause in data.pauses:
-        segment_id = None
-        if pause.segment_index is not None:
-            segment_id = segment_ids[pause.segment_index]
+        assert pause.segment_index is not None
         db.add(
             SessionPause(
                 session_id=play_session.id,
-                segment_id=segment_id,
+                segment_id=segment_ids[pause.segment_index],
                 reason=pause.reason,
                 started_at=pause.started_at,
                 ended_at=pause.ended_at,
@@ -425,25 +492,17 @@ def upload_track_points(
 
     rows: list[dict] = []
     for point in data.points:
-        if play_session.play_structure == PlayStructure.open:
-            if point.segment_index is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="segment_index must be omitted for open play structure track points",
-                )
-            segment_id = None
-        else:
-            if point.segment_index is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="segment_index is required for halves and sets track points",
-                )
-            segment_id = segment_ids.get(point.segment_index)
-            if segment_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"track point references unknown segment_index {point.segment_index}",
-                )
+        if point.segment_index is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="segment_index is required for track points",
+            )
+        segment_id = segment_ids.get(point.segment_index)
+        if segment_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"track point references unknown segment_index {point.segment_index}",
+            )
 
         rows.append(
             {

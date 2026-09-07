@@ -7,8 +7,9 @@ from geoalchemy2.shape import to_shape
 from sqlalchemy.orm import Session
 
 from app.config.database import SessionLocal
-from app.models.pitch import Pitch, PitchVisibility, UserSavedPitch
+from app.models.pitch import Pitch, UserSavedPitch
 from app.models.session import (
+    ActivityKind,
     AttackDirection,
     PauseReason,
     PlaySession,
@@ -154,7 +155,13 @@ def _make_pitch(db: Session, user: User, cleanup) -> Pitch:
 
 
 def _start_halves_session(
-    db: Session, user: User, cleanup, *, pitch_id: uuid.UUID | None = None
+    db: Session,
+    user: User,
+    cleanup,
+    *,
+    pitch_id: uuid.UUID | None = None,
+    extra_time_enabled: bool = False,
+    planned_extra_time_segment_length_minutes: int | None = None,
 ) -> uuid.UUID:
     created = session_service.create_session(
         db,
@@ -163,6 +170,10 @@ def _start_halves_session(
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
             planned_segment_length_minutes=45,
+            extra_time_enabled=extra_time_enabled,
+            planned_extra_time_segment_length_minutes=(
+                planned_extra_time_segment_length_minutes
+            ),
             pitch_id=pitch_id,
         ),
     )
@@ -178,17 +189,38 @@ def _start_halves_session(
     return created.id
 
 
-def _start_open_session(db: Session, user: User, cleanup) -> uuid.UUID:
+def _start_training_session(
+    db: Session,
+    user: User,
+    cleanup,
+    *,
+    options: list[ActivityKind] | None = None,
+    activity_kind: ActivityKind = ActivityKind.run,
+    pitch_id: uuid.UUID | None = None,
+    attack_direction: AttackDirection | None = None,
+) -> uuid.UUID:
+    if options is None:
+        options = [ActivityKind.run, ActivityKind.drill, ActivityKind.set]
     created = session_service.create_session(
         db,
         user,
         SessionCreateIn(
             session_type=SessionType.training,
-            play_structure=PlayStructure.open,
+            play_structure=PlayStructure.training_activities,
+            training_activity_options=options,
+            pitch_id=pitch_id,
         ),
     )
     cleanup(session_id=created.id)
-    session_service.start_session(db, user, created.id, SessionStartIn())
+    session_service.start_session(
+        db,
+        user,
+        created.id,
+        SessionStartIn(
+            activity_kind=activity_kind,
+            attack_direction=attack_direction,
+        ),
+    )
     return created.id
 
 
@@ -201,6 +233,7 @@ def test_finalize_unstarted_session_422(db: Session, cleanup):
             session_type=SessionType.match,
             play_structure=PlayStructure.halves,
             planned_segment_length_minutes=45,
+            extra_time_enabled=False,
         ),
     )
     cleanup(session_id=created.id)
@@ -221,22 +254,35 @@ def test_finalize_unstarted_session_422(db: Session, cleanup):
 def test_finalize_other_users_session_404(db: Session, cleanup):
     owner = _make_user(db, cleanup)
     other = _make_user(db, cleanup)
-    session_id = _start_open_session(db, owner, cleanup)
-    ended_at = datetime.now(timezone.utc)
+    session_id = _start_training_session(db, owner, cleanup)
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=30)
 
     with pytest.raises(HTTPException) as exc:
         session_service.finalize_session(
             db,
             other,
             session_id,
-            SessionFinalizeIn(ended_at=ended_at),
+            SessionFinalizeIn(
+                ended_at=ended_at,
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=1,
+                        activity_kind=ActivityKind.run,
+                        started_at=started.started_at,
+                        ended_at=ended_at,
+                    )
+                ],
+            ),
         )
     assert exc.value.status_code == 404
 
 
-def test_finalize_open_session_level_pauses(db: Session, cleanup):
+def test_finalize_training_segment_pauses(db: Session, cleanup):
     user = _make_user(db, cleanup)
-    session_id = _start_open_session(db, user, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
     started = db.get(PlaySession, session_id)
     assert started is not None
     assert started.started_at is not None
@@ -251,8 +297,17 @@ def test_finalize_open_session_level_pauses(db: Session, cleanup):
         session_id,
         SessionFinalizeIn(
             ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
             pauses=[
                 FinalizePauseIn(
+                    segment_index=1,
                     reason=PauseReason.manual,
                     started_at=pause_start,
                     ended_at=pause_end,
@@ -262,9 +317,10 @@ def test_finalize_open_session_level_pauses(db: Session, cleanup):
     )
 
     assert finalized.ended_at == ended_at
-    assert finalized.segments == []
+    assert len(finalized.segments) == 1
+    assert finalized.segments[0].activity_kind == ActivityKind.run
     assert len(finalized.pauses) == 1
-    assert finalized.pauses[0].segment_id is None
+    assert finalized.pauses[0].segment_id is not None
     assert finalized.pauses[0].reason == PauseReason.manual
 
 
@@ -310,6 +366,240 @@ def test_finalize_halves_updates_segment_one_and_creates_segment_two(
     assert finalized.segments[0].ended_at == segment_one_end
     assert finalized.segments[1].segment_index == 2
     assert finalized.segments[1].started_at == segment_two_start
+
+
+def test_finalize_halves_rejects_third_segment_without_extra_time(
+    db: Session, cleanup
+):
+    user = _make_user(db, cleanup)
+    session_id = _start_halves_session(db, user, cleanup, extra_time_enabled=False)
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+
+    t0 = started.started_at
+    t1 = t0 + timedelta(minutes=45)
+    t2 = t1 + timedelta(minutes=45)
+    t3 = t2 + timedelta(minutes=15)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.finalize_session(
+            db,
+            user,
+            session_id,
+            SessionFinalizeIn(
+                ended_at=t3,
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=1, started_at=t0, ended_at=t1
+                    ),
+                    FinalizeSegmentIn(
+                        segment_index=2, started_at=t1, ended_at=t2
+                    ),
+                    FinalizeSegmentIn(
+                        segment_index=3, started_at=t2, ended_at=t3
+                    ),
+                ],
+            ),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_finalize_halves_allows_four_segments_with_extra_time(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    session_id = _start_halves_session(
+        db,
+        user,
+        cleanup,
+        extra_time_enabled=True,
+        planned_extra_time_segment_length_minutes=15,
+    )
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+
+    t0 = started.started_at
+    t1 = t0 + timedelta(minutes=45)
+    t2 = t1 + timedelta(minutes=45)
+    t3 = t2 + timedelta(minutes=15)
+    t4 = t3 + timedelta(minutes=15)
+
+    finalized = session_service.finalize_session(
+        db,
+        user,
+        session_id,
+        SessionFinalizeIn(
+            ended_at=t4,
+            segments=[
+                FinalizeSegmentIn(segment_index=1, started_at=t0, ended_at=t1),
+                FinalizeSegmentIn(segment_index=2, started_at=t1, ended_at=t2),
+                FinalizeSegmentIn(segment_index=3, started_at=t2, ended_at=t3),
+                FinalizeSegmentIn(segment_index=4, started_at=t3, ended_at=t4),
+            ],
+        ),
+    )
+    assert len(finalized.segments) == 4
+
+
+def test_finalize_halves_rejects_fifth_segment_with_extra_time(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    session_id = _start_halves_session(
+        db,
+        user,
+        cleanup,
+        extra_time_enabled=True,
+        planned_extra_time_segment_length_minutes=15,
+    )
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+
+    t0 = started.started_at
+    times = [t0 + timedelta(minutes=15 * i) for i in range(6)]
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.finalize_session(
+            db,
+            user,
+            session_id,
+            SessionFinalizeIn(
+                ended_at=times[5],
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=i + 1,
+                        started_at=times[i],
+                        ended_at=times[i + 1],
+                    )
+                    for i in range(5)
+                ],
+            ),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_finalize_training_requires_activity_kind(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=20)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.finalize_session(
+            db,
+            user,
+            session_id,
+            SessionFinalizeIn(
+                ended_at=ended_at,
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=1,
+                        started_at=started.started_at,
+                        ended_at=ended_at,
+                    )
+                ],
+            ),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_finalize_training_set_with_pitch_requires_attack_direction(
+    db: Session, cleanup
+):
+    user = _make_user(db, cleanup)
+    pitch = _make_pitch(db, user, cleanup)
+    session_id = _start_training_session(
+        db,
+        user,
+        cleanup,
+        options=[ActivityKind.set, ActivityKind.run],
+        activity_kind=ActivityKind.set,
+        pitch_id=pitch.id,
+        attack_direction=AttackDirection.end_a,
+    )
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=20)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.finalize_session(
+            db,
+            user,
+            session_id,
+            SessionFinalizeIn(
+                ended_at=ended_at,
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=1,
+                        activity_kind=ActivityKind.set,
+                        attack_direction=None,
+                        started_at=started.started_at,
+                        ended_at=ended_at,
+                    )
+                ],
+            ),
+        )
+    assert exc.value.status_code == 422
+
+    finalized = session_service.finalize_session(
+        db,
+        user,
+        session_id,
+        SessionFinalizeIn(
+            ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.set,
+                    attack_direction=AttackDirection.end_b,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
+        ),
+    )
+    assert finalized.segments[0].attack_direction == AttackDirection.end_b
+
+
+def test_finalize_training_run_with_pitch_forces_null_attack_direction(
+    db: Session, cleanup
+):
+    user = _make_user(db, cleanup)
+    pitch = _make_pitch(db, user, cleanup)
+    session_id = _start_training_session(
+        db,
+        user,
+        cleanup,
+        options=[ActivityKind.set, ActivityKind.run],
+        activity_kind=ActivityKind.run,
+        pitch_id=pitch.id,
+    )
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=20)
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.finalize_session(
+            db,
+            user,
+            session_id,
+            SessionFinalizeIn(
+                ended_at=ended_at,
+                segments=[
+                    FinalizeSegmentIn(
+                        segment_index=1,
+                        activity_kind=ActivityKind.run,
+                        attack_direction=AttackDirection.end_a,
+                        started_at=started.started_at,
+                        ended_at=ended_at,
+                    )
+                ],
+            ),
+        )
+    assert exc.value.status_code == 422
 
 
 def test_finalize_skip_pitch_forces_null_attack_direction(db: Session, cleanup):
@@ -389,7 +679,7 @@ def test_finalize_with_pitch_requires_attack_direction(db: Session, cleanup):
 
 def test_finalize_idempotent_replaces_pauses(db: Session, cleanup):
     user = _make_user(db, cleanup)
-    session_id = _start_open_session(db, user, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
     started = db.get(PlaySession, session_id)
     assert started is not None
     assert started.started_at is not None
@@ -404,8 +694,17 @@ def test_finalize_idempotent_replaces_pauses(db: Session, cleanup):
         session_id,
         SessionFinalizeIn(
             ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
             pauses=[
                 FinalizePauseIn(
+                    segment_index=1,
                     reason=PauseReason.manual,
                     started_at=pause_start,
                     ended_at=pause_end,
@@ -421,8 +720,17 @@ def test_finalize_idempotent_replaces_pauses(db: Session, cleanup):
         session_id,
         SessionFinalizeIn(
             ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
             pauses=[
                 FinalizePauseIn(
+                    segment_index=1,
                     reason=PauseReason.gps_loss,
                     started_at=pause_start,
                     ended_at=pause_end,
@@ -437,7 +745,7 @@ def test_finalize_idempotent_replaces_pauses(db: Session, cleanup):
 
 def test_track_points_before_finalize_422(db: Session, cleanup):
     user = _make_user(db, cleanup)
-    session_id = _start_open_session(db, user, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
 
     with pytest.raises(HTTPException) as exc:
         session_service.upload_track_points(
@@ -448,6 +756,7 @@ def test_track_points_before_finalize_422(db: Session, cleanup):
                 points=[
                     TrackPointIn(
                         sequence_index=0,
+                        segment_index=1,
                         recorded_at=datetime.now(timezone.utc),
                         lat=6.45,
                         lng=3.39,
@@ -463,7 +772,7 @@ def test_track_points_after_finalize_inserts_and_idempotent_retry(
     db: Session, cleanup
 ):
     user = _make_user(db, cleanup)
-    session_id = _start_open_session(db, user, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
     started = db.get(PlaySession, session_id)
     assert started is not None
     assert started.started_at is not None
@@ -473,7 +782,17 @@ def test_track_points_after_finalize_inserts_and_idempotent_retry(
         db,
         user,
         session_id,
-        SessionFinalizeIn(ended_at=ended_at),
+        SessionFinalizeIn(
+            ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
+        ),
     )
 
     recorded_at = started.started_at + timedelta(minutes=1)
@@ -481,6 +800,7 @@ def test_track_points_after_finalize_inserts_and_idempotent_retry(
         points=[
             TrackPointIn(
                 sequence_index=0,
+                segment_index=1,
                 recorded_at=recorded_at,
                 lat=6.45,
                 lng=3.39,
@@ -507,6 +827,52 @@ def test_track_points_after_finalize_inserts_and_idempotent_retry(
     point = to_shape(stored[0].location)
     assert point.y == pytest.approx(6.45)
     assert point.x == pytest.approx(3.39)
+    assert stored[0].segment_id is not None
+
+
+def test_track_points_training_requires_segment_index(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=20)
+
+    session_service.finalize_session(
+        db,
+        user,
+        session_id,
+        SessionFinalizeIn(
+            ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        session_service.upload_track_points(
+            db,
+            user,
+            session_id,
+            TrackPointsIn(
+                points=[
+                    TrackPointIn(
+                        sequence_index=0,
+                        recorded_at=started.started_at + timedelta(minutes=1),
+                        lat=6.45,
+                        lng=3.39,
+                        horizontal_accuracy_m=5.0,
+                    )
+                ]
+            ),
+        )
+    assert exc.value.status_code == 422
 
 
 def test_track_points_halves_requires_segment_index(db: Session, cleanup):

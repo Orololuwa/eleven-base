@@ -9,6 +9,7 @@ from app.models.profile import (
     SkillLevel,
 )
 from app.models.session import (
+    ActivityKind,
     AttackDirection,
     PauseReason,
     PlaySession,
@@ -39,6 +40,7 @@ __all__ = [
     "SessionTrackPoint",
     "SessionType",
     "PlayStructure",
+    "ActivityKind",
     "AttackDirection",
     "PauseReason",
 ]

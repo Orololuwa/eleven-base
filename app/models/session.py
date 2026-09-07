@@ -4,8 +4,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from geoalchemy2 import Geography
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config.database import Base
@@ -24,7 +33,13 @@ class SessionType(str, enum.Enum):
 class PlayStructure(str, enum.Enum):
     halves = "halves"
     sets = "sets"
-    open = "open"
+    training_activities = "training_activities"
+
+
+class ActivityKind(str, enum.Enum):
+    run = "run"
+    drill = "drill"
+    set = "set"
 
 
 class AttackDirection(str, enum.Enum):
@@ -51,9 +66,16 @@ class PlaySession(Base):
         index=True,
     )
     session_type: Mapped[SessionType] = mapped_column(String(16), nullable=False)
-    play_structure: Mapped[PlayStructure] = mapped_column(String(16), nullable=False)
+    play_structure: Mapped[PlayStructure] = mapped_column(String(32), nullable=False)
     planned_segment_length_minutes: Mapped[int | None] = mapped_column(
         Integer, nullable=True
+    )
+    extra_time_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    planned_extra_time_segment_length_minutes: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    training_activity_options: Mapped[list[ActivityKind] | None] = mapped_column(
+        ARRAY(String(16)), nullable=True
     )
     pitch_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -113,6 +135,9 @@ class SessionSegment(Base):
         index=True,
     )
     segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    activity_kind: Mapped[ActivityKind | None] = mapped_column(
+        String(16), nullable=True
+    )
     attack_direction: Mapped[AttackDirection | None] = mapped_column(
         String(16), nullable=True
     )
