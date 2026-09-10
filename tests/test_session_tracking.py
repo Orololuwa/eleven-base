@@ -828,6 +828,62 @@ def test_track_points_after_finalize_inserts_and_idempotent_retry(
     assert point.y == pytest.approx(6.45)
     assert point.x == pytest.approx(3.39)
     assert stored[0].segment_id is not None
+    assert stored[0].speed_kmh == pytest.approx(10.5)
+    assert stored[0].speed_accuracy_mps is None
+
+
+def test_track_points_persists_speed_accuracy_mps(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    session_id = _start_training_session(db, user, cleanup)
+    started = db.get(PlaySession, session_id)
+    assert started is not None
+    assert started.started_at is not None
+    ended_at = started.started_at + timedelta(minutes=30)
+
+    session_service.finalize_session(
+        db,
+        user,
+        session_id,
+        SessionFinalizeIn(
+            ended_at=ended_at,
+            segments=[
+                FinalizeSegmentIn(
+                    segment_index=1,
+                    activity_kind=ActivityKind.run,
+                    started_at=started.started_at,
+                    ended_at=ended_at,
+                )
+            ],
+        ),
+    )
+
+    result = session_service.upload_track_points(
+        db,
+        user,
+        session_id,
+        TrackPointsIn(
+            points=[
+                TrackPointIn(
+                    sequence_index=0,
+                    segment_index=1,
+                    recorded_at=started.started_at + timedelta(minutes=1),
+                    lat=6.45,
+                    lng=3.39,
+                    speed_kmh=12.4,
+                    speed_accuracy_mps=1.2,
+                    horizontal_accuracy_m=8.0,
+                )
+            ]
+        ),
+    )
+    assert result.inserted == 1
+
+    stored = (
+        db.query(SessionTrackPoint)
+        .filter(SessionTrackPoint.session_id == session_id)
+        .one()
+    )
+    assert stored.speed_accuracy_mps == pytest.approx(1.2)
 
 
 def test_track_points_training_requires_segment_index(db: Session, cleanup):

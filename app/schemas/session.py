@@ -175,6 +175,7 @@ class TrackPointIn(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)
     speed_kmh: float | None = Field(default=None, ge=0)
+    speed_accuracy_mps: float | None = Field(default=None, ge=0)
     horizontal_accuracy_m: float = Field(..., gt=0)
 
 

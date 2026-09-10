@@ -514,6 +514,7 @@ def upload_track_points(
                     f"POINT({point.lng} {point.lat})", srid=4326
                 ),
                 "speed_kmh": point.speed_kmh,
+                "speed_accuracy_mps": point.speed_accuracy_mps,
                 "horizontal_accuracy_m": point.horizontal_accuracy_m,
             }
         )

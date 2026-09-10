@@ -233,6 +233,7 @@ class SessionTrackPoint(Base):
         nullable=False,
     )
     speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    speed_accuracy_mps: Mapped[float | None] = mapped_column(Float, nullable=True)
     horizontal_accuracy_m: Mapped[float] = mapped_column(Float, nullable=False)
 
     session: Mapped["PlaySession"] = relationship(
