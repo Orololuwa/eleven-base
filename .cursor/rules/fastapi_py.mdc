@@ -25,7 +25,7 @@ Pydantic v2 models in `app/schemas/`. `ConfigDict(from_attributes=True)` for ORM
 
 ## ORM and Postgres
 
-SQLAlchemy 2.0 (`Mapped` / `mapped_column`) on `Base` from `app/config/database.py`. Driver: `psycopg2`. UUID PKs (`postgresql.UUID(as_uuid=True)`). Sessions via `get_db`. Queries and commits live in `app/services/`. Re-export new models from `app/models/__init__.py`. Multi-value enums with no per-item metadata use `ARRAY(String)` (e.g. `training_activity_options`); join tables stay for rows that have their own attributes (`player_positions`).
+SQLAlchemy 2.0 (`Mapped` / `mapped_column`) on `Base` from `app/config/database.py`. Driver: `psycopg2`. UUID PKs (`postgresql.UUID(as_uuid=True)`). Sessions via `get_db`. Queries and commits live in `app/services/`. Re-export new models from `app/models/__init__.py`. Multi-value enums with no per-item metadata use `ARRAY(String)` (e.g. `training_activity_options`); join tables stay for rows that have their own attributes (`player_positions`). `JSONB` only for small self-describing computed payloads written once (e.g. `session_metrics.speed_band_boundaries_kmh`); validate its shape with a Pydantic model, never store free-form dicts. `Numeric(p, s)` for fixed-precision user-entered decimals (`weight_kg`); expose as `float` in schemas. Client-computed metrics are stored as given and never recomputed server-side; coherence failures go to an `ingest_flags` array rather than a 422.
 
 ## Migrations
 

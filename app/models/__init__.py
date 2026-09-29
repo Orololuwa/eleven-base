@@ -6,18 +6,26 @@ from app.models.profile import (
     PositionCode,
     PreferredFoot,
     ProfileVisibility,
+    Sex,
     SkillLevel,
 )
 from app.models.session import (
     ActivityKind,
     AttackDirection,
+    DataQuality,
+    IngestFlag,
     PauseReason,
     PlaySession,
     PlayStructure,
+    SegmentMetrics,
+    SessionMetrics,
     SessionPause,
     SessionSegment,
     SessionTrackPoint,
     SessionType,
+    SpeedBandBucket,
+    SpeedSource,
+    SprintEffort,
 )
 from app.models.user import User
 
@@ -31,6 +39,7 @@ __all__ = [
     "SkillLevel",
     "ProfileVisibility",
     "PositionCode",
+    "Sex",
     "Pitch",
     "PitchVisibility",
     "UserSavedPitch",
@@ -43,4 +52,11 @@ __all__ = [
     "ActivityKind",
     "AttackDirection",
     "PauseReason",
+    "SessionMetrics",
+    "SegmentMetrics",
+    "SprintEffort",
+    "SpeedSource",
+    "DataQuality",
+    "SpeedBandBucket",
+    "IngestFlag",
 ]

@@ -14,7 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config.database import Base
@@ -51,6 +51,33 @@ class PauseReason(str, enum.Enum):
     manual = "manual"
     gps_loss = "gps_loss"
     backgrounded = "backgrounded"
+
+
+class SpeedSource(str, enum.Enum):
+    os = "os"
+    position_delta = "position_delta"
+    none = "none"
+
+
+class DataQuality(str, enum.Enum):
+    good = "good"
+    estimated = "estimated"
+    insufficient = "insufficient"
+
+
+class SpeedBandBucket(str, enum.Enum):
+    futsal = "futsal"
+    small = "small"
+    mid = "mid"
+    full = "full"
+
+
+class IngestFlag(str, enum.Enum):
+    totals_mismatch = "totals_mismatch"
+    duration_incoherent = "duration_incoherent"
+    sprint_incoherent = "sprint_incoherent"
+    zone_incoherent = "zone_incoherent"
+    calorie_implausible = "calorie_implausible"
 
 
 class PlaySession(Base):
@@ -113,6 +140,18 @@ class PlaySession(Base):
         cascade="all, delete-orphan",
         order_by="SessionTrackPoint.sequence_index",
     )
+    metrics: Mapped["SessionMetrics | None"] = relationship(
+        "SessionMetrics",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    sprint_efforts: Mapped[list["SprintEffort"]] = relationship(
+        "SprintEffort",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="SprintEffort.effort_index",
+    )
 
 
 class SessionSegment(Base):
@@ -163,6 +202,18 @@ class SessionSegment(Base):
         cascade="all, delete-orphan",
         order_by="SessionTrackPoint.sequence_index",
     )
+    metrics: Mapped["SegmentMetrics | None"] = relationship(
+        "SegmentMetrics",
+        back_populates="segment",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    sprint_efforts: Mapped[list["SprintEffort"]] = relationship(
+        "SprintEffort",
+        back_populates="segment",
+        cascade="all, delete-orphan",
+        order_by="SprintEffort.effort_index",
+    )
 
 
 class SessionPause(Base):
@@ -177,10 +228,10 @@ class SessionPause(Base):
         nullable=False,
         index=True,
     )
-    segment_id: Mapped[uuid.UUID | None] = mapped_column(
+    segment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("session_segments.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     reason: Mapped[PauseReason] = mapped_column(String(16), nullable=False)
@@ -194,7 +245,7 @@ class SessionPause(Base):
     session: Mapped["PlaySession"] = relationship(
         "PlaySession", back_populates="pauses"
     )
-    segment: Mapped["SessionSegment | None"] = relationship(
+    segment: Mapped["SessionSegment"] = relationship(
         "SessionSegment", back_populates="pauses"
     )
 
@@ -218,10 +269,10 @@ class SessionTrackPoint(Base):
         nullable=False,
         index=True,
     )
-    segment_id: Mapped[uuid.UUID | None] = mapped_column(
+    segment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("session_segments.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     sequence_index: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -239,6 +290,137 @@ class SessionTrackPoint(Base):
     session: Mapped["PlaySession"] = relationship(
         "PlaySession", back_populates="track_points"
     )
-    segment: Mapped["SessionSegment | None"] = relationship(
+    segment: Mapped["SessionSegment"] = relationship(
         "SessionSegment", back_populates="track_points"
+    )
+
+
+class SessionMetrics(Base):
+    __tablename__ = "session_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    active_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    top_speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_speed_location = mapped_column(
+        Geography(geometry_type="POINT", srid=4326, spatial_index=False),
+        nullable=True,
+    )
+    sprint_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sprint_distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    zone_walk_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_jog_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_run_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_high_run_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_sprint_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calories_kcal: Mapped[int] = mapped_column(Integer, nullable=False)
+    mass_kg_at_computation: Mapped[float] = mapped_column(Float, nullable=False)
+    speed_source: Mapped[SpeedSource] = mapped_column(String(16), nullable=False)
+    data_quality: Mapped[DataQuality] = mapped_column(String(16), nullable=False)
+    speed_band_bucket: Mapped[SpeedBandBucket] = mapped_column(
+        String(16), nullable=False
+    )
+    speed_band_boundaries_kmh: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    pitch_long_axis_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    accepted_fix_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    gap_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    ingest_flags: Mapped[list[IngestFlag]] = mapped_column(
+        ARRAY(String(32)), nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    session: Mapped["PlaySession"] = relationship(
+        "PlaySession", back_populates="metrics"
+    )
+
+
+class SegmentMetrics(Base):
+    __tablename__ = "segment_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    segment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("session_segments.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    active_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    gap_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    top_speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sprint_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sprint_distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    zone_walk_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_jog_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_run_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_high_run_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_sprint_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calories_kcal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    segment: Mapped["SessionSegment"] = relationship(
+        "SessionSegment", back_populates="metrics"
+    )
+
+
+class SprintEffort(Base):
+    __tablename__ = "sprint_efforts"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "effort_index",
+            name="uq_sprint_efforts_session_effort_index",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    segment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("session_segments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    effort_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    ended_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    duration_s: Mapped[float] = mapped_column(Float, nullable=False)
+    distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    peak_speed_kmh: Mapped[float] = mapped_column(Float, nullable=False)
+    peak_location = mapped_column(
+        Geography(geometry_type="POINT", srid=4326, spatial_index=False),
+        nullable=True,
+    )
+
+    session: Mapped["PlaySession"] = relationship(
+        "PlaySession", back_populates="sprint_efforts"
+    )
+    segment: Mapped["SessionSegment"] = relationship(
+        "SessionSegment", back_populates="sprint_efforts"
     )

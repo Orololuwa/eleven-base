@@ -1,6 +1,7 @@
 import enum
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from geoalchemy2 import Geography
@@ -11,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -42,6 +44,12 @@ class SkillLevel(str, enum.Enum):
 class ProfileVisibility(str, enum.Enum):
     public = "public"
     private = "private"
+
+
+class Sex(str, enum.Enum):
+    male = "male"
+    female = "female"
+    prefer_not_to_say = "prefer_not_to_say"
 
 
 class PositionCode(str, enum.Enum):
@@ -80,6 +88,11 @@ class PlayerProfile(Base):
         String(16), nullable=True
     )
     height_cm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
+    weight_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sex: Mapped[Sex | None] = mapped_column(String(32), nullable=True)
     skill_level: Mapped[SkillLevel | None] = mapped_column(String(32), nullable=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     location = mapped_column(

@@ -11,6 +11,7 @@ from app.models.profile import (
     PlayerProfile,
     PositionCode,
     ProfileVisibility,
+    Sex,
 )
 from app.models.user import User
 from app.schemas.profile import (
@@ -131,6 +132,17 @@ def test_profile_update_rejects_bad_height():
         ProfileUpdate(height_cm=50)
 
 
+@pytest.mark.parametrize("weight", [29.9, 200.1])
+def test_profile_update_rejects_bad_weight(weight: float):
+    with pytest.raises(ValidationError):
+        ProfileUpdate(weight_kg=weight)
+
+
+def test_profile_update_rejects_unknown_sex():
+    with pytest.raises(ValidationError):
+        ProfileUpdate(sex="other")
+
+
 def test_profile_update_rejects_long_bio():
     with pytest.raises(ValidationError):
         ProfileUpdate(bio="x" * 501)
@@ -240,6 +252,44 @@ def test_public_profile_visible_to_others(db: Session, cleanup):
     public = get_profile_for_viewer(db, owner.id, viewer)
     assert public.display_name == "Striker"
     assert not hasattr(public, "date_of_birth") or "date_of_birth" not in public.model_dump()
+
+
+def test_weight_write_sets_weight_updated_at(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    get_or_create_profile(db, user)
+    profile = update_profile(
+        db, user, ProfileUpdate(weight_kg=72.46, sex=Sex.prefer_not_to_say)
+    )
+    assert profile.weight_kg == 72.5
+    assert profile.sex == Sex.prefer_not_to_say
+    assert profile.weight_updated_at is not None
+
+
+def test_confirming_same_weight_refreshes_timestamp(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    get_or_create_profile(db, user)
+    first = update_profile(db, user, ProfileUpdate(weight_kg=80))
+    second = update_profile(db, user, ProfileUpdate(weight_kg=80))
+    assert second.weight_kg == first.weight_kg
+    assert second.weight_updated_at > first.weight_updated_at
+
+
+def test_sex_write_does_not_touch_weight_updated_at(db: Session, cleanup):
+    user = _make_user(db, cleanup)
+    get_or_create_profile(db, user)
+    profile = update_profile(db, user, ProfileUpdate(sex=Sex.female))
+    assert profile.weight_updated_at is None
+
+
+def test_public_profile_omits_weight_and_sex(db: Session, cleanup):
+    owner = _make_user(db, cleanup)
+    viewer = _make_user(db, cleanup)
+    get_or_create_profile(db, owner)
+    update_profile(db, owner, ProfileUpdate(weight_kg=70, sex=Sex.male))
+    dumped = get_profile_for_viewer(db, owner.id, viewer).model_dump()
+    assert "weight_kg" not in dumped
+    assert "sex" not in dumped
+    assert "weight_updated_at" not in dumped
 
 
 def test_confirm_and_delete_avatar(db: Session, cleanup):

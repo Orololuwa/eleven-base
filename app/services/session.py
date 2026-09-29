@@ -4,27 +4,37 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session, joinedload
+from geoalchemy2.shape import to_shape
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.session import (
     ActivityKind,
+    IngestFlag,
     PlaySession,
     PlayStructure,
+    SegmentMetrics,
+    SessionMetrics,
     SessionPause,
     SessionSegment,
     SessionTrackPoint,
     SessionType,
+    SpeedSource,
+    SprintEffort,
 )
 from app.models.user import User
+from app.schemas.profile import LocationIn, LocationOut
 from app.schemas.session import (
     FinalizePauseIn,
     FinalizeSegmentIn,
+    SegmentMetricsOut,
     SessionCreateIn,
     SessionFinalizeIn,
+    SessionMetricsOut,
     SessionPauseOut,
     SessionRead,
     SessionSegmentOut,
     SessionStartIn,
+    SprintEffortOut,
     TrackPointsIn,
     TrackPointsOut,
 )
@@ -54,7 +64,84 @@ def _serialize_segment(segment: SessionSegment) -> SessionSegmentOut:
     )
 
 
+def _location_to_out(location) -> LocationOut | None:
+    if location is None:
+        return None
+    point = to_shape(location)
+    return LocationOut(lat=point.y, lng=point.x)
+
+
+def _location_to_wkt(location: LocationIn | None) -> WKTElement | None:
+    if location is None:
+        return None
+    return WKTElement(f"POINT({location.lng} {location.lat})", srid=4326)
+
+
+def _serialize_session_metrics(metrics: SessionMetrics) -> SessionMetricsOut:
+    return SessionMetricsOut(
+        active_duration_seconds=metrics.active_duration_seconds,
+        distance_m=metrics.distance_m,
+        gap_seconds=metrics.gap_seconds,
+        top_speed_kmh=metrics.top_speed_kmh,
+        top_speed_location=_location_to_out(metrics.top_speed_location),
+        sprint_count=metrics.sprint_count,
+        sprint_distance_m=metrics.sprint_distance_m,
+        zone_walk_seconds=metrics.zone_walk_seconds,
+        zone_jog_seconds=metrics.zone_jog_seconds,
+        zone_run_seconds=metrics.zone_run_seconds,
+        zone_high_run_seconds=metrics.zone_high_run_seconds,
+        zone_sprint_seconds=metrics.zone_sprint_seconds,
+        calories_kcal=metrics.calories_kcal,
+        mass_kg_at_computation=metrics.mass_kg_at_computation,
+        speed_source=metrics.speed_source,
+        data_quality=metrics.data_quality,
+        speed_band_bucket=metrics.speed_band_bucket,
+        speed_band_boundaries_kmh=metrics.speed_band_boundaries_kmh,
+        pitch_long_axis_m=metrics.pitch_long_axis_m,
+        accepted_fix_count=metrics.accepted_fix_count,
+        algorithm_version=metrics.algorithm_version,
+        computed_at=metrics.computed_at,
+        ingest_flags=list(metrics.ingest_flags or []),
+    )
+
+
+def _serialize_segment_metrics(
+    segment: SessionSegment, metrics: SegmentMetrics
+) -> SegmentMetricsOut:
+    return SegmentMetricsOut(
+        segment_index=segment.segment_index,
+        active_duration_seconds=metrics.active_duration_seconds,
+        distance_m=metrics.distance_m,
+        gap_seconds=metrics.gap_seconds,
+        top_speed_kmh=metrics.top_speed_kmh,
+        sprint_count=metrics.sprint_count,
+        sprint_distance_m=metrics.sprint_distance_m,
+        zone_walk_seconds=metrics.zone_walk_seconds,
+        zone_jog_seconds=metrics.zone_jog_seconds,
+        zone_run_seconds=metrics.zone_run_seconds,
+        zone_high_run_seconds=metrics.zone_high_run_seconds,
+        zone_sprint_seconds=metrics.zone_sprint_seconds,
+        calories_kcal=metrics.calories_kcal,
+    )
+
+
+def _serialize_sprint_effort(
+    effort: SprintEffort, segment_indexes: dict[uuid.UUID, int]
+) -> SprintEffortOut:
+    return SprintEffortOut(
+        effort_index=effort.effort_index,
+        segment_index=segment_indexes[effort.segment_id],
+        started_at=effort.started_at,
+        ended_at=effort.ended_at,
+        duration_s=effort.duration_s,
+        distance_m=effort.distance_m,
+        peak_speed_kmh=effort.peak_speed_kmh,
+        peak_location=_location_to_out(effort.peak_location),
+    )
+
+
 def _serialize_session(session: PlaySession) -> SessionRead:
+    segment_indexes = {s.id: s.segment_index for s in session.segments}
     return SessionRead(
         id=session.id,
         user_id=session.user_id,
@@ -72,6 +159,20 @@ def _serialize_session(session: PlaySession) -> SessionRead:
         ended_at=session.ended_at,
         segments=[_serialize_segment(s) for s in session.segments],
         pauses=[_serialize_pause(p) for p in session.pauses],
+        metrics=(
+            _serialize_session_metrics(session.metrics)
+            if session.metrics is not None
+            else None
+        ),
+        segment_metrics=[
+            _serialize_segment_metrics(s, s.metrics)
+            for s in session.segments
+            if s.metrics is not None
+        ],
+        sprint_efforts=[
+            _serialize_sprint_effort(e, segment_indexes)
+            for e in session.sprint_efforts
+        ],
     )
 
 
@@ -79,8 +180,10 @@ def _load_session(db: Session, session_id: uuid.UUID) -> PlaySession | None:
     return (
         db.query(PlaySession)
         .options(
-            joinedload(PlaySession.segments),
+            joinedload(PlaySession.segments).selectinload(SessionSegment.metrics),
             joinedload(PlaySession.pauses),
+            selectinload(PlaySession.metrics),
+            selectinload(PlaySession.sprint_efforts),
         )
         .filter(PlaySession.id == session_id)
         .one_or_none()
@@ -244,11 +347,6 @@ def _validate_pauses(
     for pause in pauses:
         _validate_closed_interval(pause.started_at, pause.ended_at, "pause")
 
-        if pause.segment_index is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="segment_index is required for pauses",
-            )
         window = segment_windows.get(pause.segment_index)
         if window is None:
             raise HTTPException(
@@ -318,6 +416,183 @@ def _upsert_segments(
         .all()
     )
     return {segment.segment_index: segment.id for segment in refreshed}
+
+
+_SUMMED_INT_FIELDS = (
+    "active_duration_seconds",
+    "gap_seconds",
+    "calories_kcal",
+    "sprint_count",
+    "zone_walk_seconds",
+    "zone_jog_seconds",
+    "zone_run_seconds",
+    "zone_high_run_seconds",
+    "zone_sprint_seconds",
+)
+_SUMMED_FLOAT_FIELDS = ("distance_m", "sprint_distance_m")
+_ZONE_FIELDS = (
+    "zone_walk_seconds",
+    "zone_jog_seconds",
+    "zone_run_seconds",
+    "zone_high_run_seconds",
+    "zone_sprint_seconds",
+)
+_FLOAT_TOTAL_TOLERANCE = 0.5
+_DURATION_TOLERANCE_SECONDS = 1
+_ZONE_TOLERANCE_SECONDS = 5
+_MAX_MET = 19.0
+_CALORIE_CEILING_SLACK = 1.1
+
+
+def _totals_match(data: SessionFinalizeIn) -> bool:
+    metrics = data.metrics
+    assert metrics is not None
+    for field in (*_SUMMED_INT_FIELDS, *_SUMMED_FLOAT_FIELDS):
+        total = getattr(metrics, field)
+        parts = [getattr(row, field) for row in data.segment_metrics]
+        if total is None or any(part is None for part in parts):
+            if total is not None or any(part is not None for part in parts):
+                return False
+            continue
+        if field in _SUMMED_FLOAT_FIELDS:
+            if abs(total - sum(parts)) > _FLOAT_TOTAL_TOLERANCE:
+                return False
+        elif total != sum(parts):
+            return False
+    return True
+
+
+def _durations_coherent(data: SessionFinalizeIn) -> bool:
+    metrics = data.metrics
+    assert metrics is not None
+    if metrics.gap_seconds > metrics.active_duration_seconds:
+        return False
+    windows = {s.segment_index: s for s in data.segments}
+    for row in data.segment_metrics:
+        segment = windows[row.segment_index]
+        span = (segment.ended_at - segment.started_at).total_seconds()
+        if row.active_duration_seconds > span + _DURATION_TOLERANCE_SECONDS:
+            return False
+        if row.gap_seconds > row.active_duration_seconds:
+            return False
+    return True
+
+
+def _sprints_coherent(data: SessionFinalizeIn) -> bool:
+    metrics = data.metrics
+    assert metrics is not None
+    boundary = metrics.speed_band_boundaries_kmh.sprint
+    windows = {s.segment_index: s for s in data.segments}
+
+    for effort in data.sprint_efforts:
+        segment = windows[effort.segment_index]
+        if effort.ended_at < effort.started_at:
+            return False
+        if effort.started_at < segment.started_at or effort.ended_at > segment.ended_at:
+            return False
+        if effort.peak_speed_kmh < boundary:
+            return False
+
+    ordered = sorted(data.sprint_efforts, key=lambda effort: effort.started_at)
+    for left, right in zip(ordered, ordered[1:]):
+        if left.ended_at > right.started_at:
+            return False
+
+    if metrics.sprint_count is not None:
+        if metrics.sprint_count != len(data.sprint_efforts):
+            return False
+        for row in data.segment_metrics:
+            in_segment = sum(
+                1 for e in data.sprint_efforts if e.segment_index == row.segment_index
+            )
+            if row.sprint_count != in_segment:
+                return False
+    return True
+
+
+def _zones_coherent(data: SessionFinalizeIn) -> bool:
+    metrics = data.metrics
+    assert metrics is not None
+    if metrics.speed_source == SpeedSource.none:
+        return True
+    for row in data.segment_metrics:
+        zone_total = sum(getattr(row, field) for field in _ZONE_FIELDS)
+        covered = row.active_duration_seconds - row.gap_seconds
+        if abs(zone_total - covered) > _ZONE_TOLERANCE_SECONDS:
+            return False
+    return True
+
+
+def _calories_plausible(data: SessionFinalizeIn) -> bool:
+    metrics = data.metrics
+    assert metrics is not None
+    ceiling = (
+        _CALORIE_CEILING_SLACK
+        * _MAX_MET
+        * 3.5
+        / 200
+        * metrics.mass_kg_at_computation
+        * (metrics.active_duration_seconds / 60)
+    )
+    return 0 <= metrics.calories_kcal <= ceiling
+
+
+def _compute_ingest_flags(data: SessionFinalizeIn) -> list[IngestFlag]:
+    flags: list[IngestFlag] = []
+    if not _totals_match(data):
+        flags.append(IngestFlag.totals_mismatch)
+    if not _durations_coherent(data):
+        flags.append(IngestFlag.duration_incoherent)
+    if not _sprints_coherent(data):
+        flags.append(IngestFlag.sprint_incoherent)
+    if not _zones_coherent(data):
+        flags.append(IngestFlag.zone_incoherent)
+    if not _calories_plausible(data):
+        flags.append(IngestFlag.calorie_implausible)
+    return flags
+
+
+def _insert_metrics(
+    db: Session,
+    play_session: PlaySession,
+    data: SessionFinalizeIn,
+    segment_ids: dict[int, uuid.UUID],
+) -> None:
+    metrics = data.metrics
+    assert metrics is not None
+    stmt = (
+        insert(SessionMetrics)
+        .values(
+            session_id=play_session.id,
+            **metrics.model_dump(
+                exclude={"top_speed_location", "speed_band_boundaries_kmh"}
+            ),
+            top_speed_location=_location_to_wkt(metrics.top_speed_location),
+            speed_band_boundaries_kmh=metrics.speed_band_boundaries_kmh.model_dump(),
+            ingest_flags=[flag.value for flag in _compute_ingest_flags(data)],
+        )
+        .on_conflict_do_nothing(index_elements=[SessionMetrics.session_id])
+        .returning(SessionMetrics.id)
+    )
+    if db.execute(stmt).first() is None:
+        return
+
+    for row in data.segment_metrics:
+        db.add(
+            SegmentMetrics(
+                segment_id=segment_ids[row.segment_index],
+                **row.model_dump(exclude={"segment_index"}),
+            )
+        )
+    for effort in data.sprint_efforts:
+        db.add(
+            SprintEffort(
+                session_id=play_session.id,
+                segment_id=segment_ids[effort.segment_index],
+                **effort.model_dump(exclude={"segment_index", "peak_location"}),
+                peak_location=_location_to_wkt(effort.peak_location),
+            )
+        )
 
 
 def create_session(db: Session, user: User, data: SessionCreateIn) -> SessionRead:
@@ -452,7 +727,6 @@ def finalize_session(
     }
 
     for pause in data.pauses:
-        assert pause.segment_index is not None
         db.add(
             SessionPause(
                 session_id=play_session.id,
@@ -462,6 +736,9 @@ def finalize_session(
                 ended_at=pause.ended_at,
             )
         )
+
+    if data.metrics is not None:
+        _insert_metrics(db, play_session, data, segment_ids)
 
     play_session.ended_at = data.ended_at
     db.add(play_session)
@@ -492,11 +769,6 @@ def upload_track_points(
 
     rows: list[dict] = []
     for point in data.points:
-        if point.segment_index is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="segment_index is required for track points",
-            )
         segment_id = segment_ids.get(point.segment_index)
         if segment_id is None:
             raise HTTPException(

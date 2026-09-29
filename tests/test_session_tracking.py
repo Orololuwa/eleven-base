@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 from geoalchemy2.shape import to_shape
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.config.database import SessionLocal
@@ -886,52 +887,28 @@ def test_track_points_persists_speed_accuracy_mps(db: Session, cleanup):
     assert stored.speed_accuracy_mps == pytest.approx(1.2)
 
 
-def test_track_points_training_requires_segment_index(db: Session, cleanup):
-    user = _make_user(db, cleanup)
-    session_id = _start_training_session(db, user, cleanup)
-    started = db.get(PlaySession, session_id)
-    assert started is not None
-    assert started.started_at is not None
-    ended_at = started.started_at + timedelta(minutes=20)
-
-    session_service.finalize_session(
-        db,
-        user,
-        session_id,
-        SessionFinalizeIn(
-            ended_at=ended_at,
-            segments=[
-                FinalizeSegmentIn(
-                    segment_index=1,
-                    activity_kind=ActivityKind.run,
-                    started_at=started.started_at,
-                    ended_at=ended_at,
-                )
-            ],
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc:
-        session_service.upload_track_points(
-            db,
-            user,
-            session_id,
-            TrackPointsIn(
-                points=[
-                    TrackPointIn(
-                        sequence_index=0,
-                        recorded_at=started.started_at + timedelta(minutes=1),
-                        lat=6.45,
-                        lng=3.39,
-                        horizontal_accuracy_m=5.0,
-                    )
-                ]
-            ),
+def test_track_point_schema_requires_segment_index():
+    with pytest.raises(ValidationError):
+        TrackPointIn(
+            sequence_index=0,
+            recorded_at=datetime.now(timezone.utc),
+            lat=6.45,
+            lng=3.39,
+            horizontal_accuracy_m=5.0,
         )
-    assert exc.value.status_code == 422
 
 
-def test_track_points_halves_requires_segment_index(db: Session, cleanup):
+def test_finalize_pause_schema_requires_segment_index():
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        FinalizePauseIn(
+            reason=PauseReason.backgrounded,
+            started_at=now,
+            ended_at=now + timedelta(seconds=30),
+        )
+
+
+def test_track_points_halves_resolves_segment_index(db: Session, cleanup):
     user = _make_user(db, cleanup)
     session_id = _start_halves_session(db, user, cleanup)
     started = db.get(PlaySession, session_id)
@@ -954,25 +931,6 @@ def test_track_points_halves_requires_segment_index(db: Session, cleanup):
             ],
         ),
     )
-
-    with pytest.raises(HTTPException) as exc:
-        session_service.upload_track_points(
-            db,
-            user,
-            session_id,
-            TrackPointsIn(
-                points=[
-                    TrackPointIn(
-                        sequence_index=0,
-                        recorded_at=started.started_at + timedelta(minutes=1),
-                        lat=6.45,
-                        lng=3.39,
-                        horizontal_accuracy_m=5.0,
-                    )
-                ]
-            ),
-        )
-    assert exc.value.status_code == 422
 
     result = session_service.upload_track_points(
         db,

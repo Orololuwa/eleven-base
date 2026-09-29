@@ -6,10 +6,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.session import (
     ActivityKind,
     AttackDirection,
+    DataQuality,
+    IngestFlag,
     PauseReason,
     PlayStructure,
     SessionType,
+    SpeedBandBucket,
+    SpeedSource,
 )
+from app.schemas.profile import LocationIn, LocationOut
 
 _SESSION_TYPE_PLAY_STRUCTURES: dict[SessionType, set[PlayStructure]] = {
     SessionType.match: {PlayStructure.halves},
@@ -134,6 +139,9 @@ class SessionRead(BaseModel):
     ended_at: datetime | None = None
     segments: list[SessionSegmentOut] = []
     pauses: list["SessionPauseOut"] = []
+    metrics: "SessionMetricsOut | None" = None
+    segment_metrics: list["SegmentMetricsOut"] = []
+    sprint_efforts: list["SprintEffortOut"] = []
 
 
 class SessionPauseOut(BaseModel):
@@ -141,7 +149,7 @@ class SessionPauseOut(BaseModel):
 
     id: UUID
     session_id: UUID
-    segment_id: UUID | None
+    segment_id: UUID
     reason: PauseReason
     started_at: datetime
     ended_at: datetime
@@ -156,21 +164,196 @@ class FinalizeSegmentIn(BaseModel):
 
 
 class FinalizePauseIn(BaseModel):
-    segment_index: int | None = None
+    segment_index: int = Field(..., ge=1)
     reason: PauseReason
     started_at: datetime
     ended_at: datetime
+
+
+class SpeedBandBoundaries(BaseModel):
+    walk: float = Field(..., gt=0)
+    jog: float = Field(..., gt=0)
+    run: float = Field(..., gt=0)
+    high_run: float = Field(..., gt=0)
+    sprint: float = Field(..., gt=0)
+
+    @model_validator(mode="after")
+    def validate_ascending(self) -> "SpeedBandBoundaries":
+        ordered = [self.walk, self.jog, self.run, self.high_run, self.sprint]
+        if any(left > right for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("speed band boundaries must be non-decreasing")
+        return self
+
+
+_SPEED_DERIVED_FIELDS = (
+    "top_speed_kmh",
+    "sprint_count",
+    "sprint_distance_m",
+    "zone_walk_seconds",
+    "zone_jog_seconds",
+    "zone_run_seconds",
+    "zone_high_run_seconds",
+    "zone_sprint_seconds",
+)
+
+
+class _MetricTotalsIn(BaseModel):
+    active_duration_seconds: int = Field(..., ge=0)
+    distance_m: float = Field(..., ge=0)
+    gap_seconds: int = Field(..., ge=0)
+    top_speed_kmh: float | None = Field(default=None, ge=0)
+    sprint_count: int | None = Field(default=None, ge=0)
+    sprint_distance_m: float | None = Field(default=None, ge=0)
+    zone_walk_seconds: int | None = Field(default=None, ge=0)
+    zone_jog_seconds: int | None = Field(default=None, ge=0)
+    zone_run_seconds: int | None = Field(default=None, ge=0)
+    zone_high_run_seconds: int | None = Field(default=None, ge=0)
+    zone_sprint_seconds: int | None = Field(default=None, ge=0)
+    calories_kcal: int = Field(..., ge=0)
+
+
+class SessionMetricsIn(_MetricTotalsIn):
+    top_speed_location: LocationIn | None = None
+    mass_kg_at_computation: float = Field(..., gt=0)
+    speed_source: SpeedSource
+    data_quality: DataQuality
+    speed_band_bucket: SpeedBandBucket
+    speed_band_boundaries_kmh: SpeedBandBoundaries
+    pitch_long_axis_m: float | None = Field(default=None, ge=0)
+    accepted_fix_count: int = Field(..., ge=0)
+    algorithm_version: str = Field(..., min_length=1, max_length=32)
+    computed_at: datetime
+
+
+class SegmentMetricsIn(_MetricTotalsIn):
+    segment_index: int = Field(..., ge=1)
+
+
+class SprintEffortIn(BaseModel):
+    effort_index: int = Field(..., ge=0)
+    segment_index: int = Field(..., ge=1)
+    started_at: datetime
+    ended_at: datetime
+    duration_s: float = Field(..., ge=0)
+    distance_m: float = Field(..., ge=0)
+    peak_speed_kmh: float = Field(..., ge=0)
+    peak_location: LocationIn | None = None
 
 
 class SessionFinalizeIn(BaseModel):
     ended_at: datetime
     segments: list[FinalizeSegmentIn] = []
     pauses: list[FinalizePauseIn] = []
+    metrics: SessionMetricsIn | None = None
+    segment_metrics: list[SegmentMetricsIn] = []
+    sprint_efforts: list[SprintEffortIn] = []
+
+    @model_validator(mode="after")
+    def validate_metrics_shape(self) -> "SessionFinalizeIn":
+        if self.metrics is None:
+            if self.segment_metrics or self.sprint_efforts:
+                raise ValueError(
+                    "segment_metrics and sprint_efforts require metrics"
+                )
+            return self
+
+        segment_indexes = {segment.segment_index for segment in self.segments}
+        metric_indexes = [row.segment_index for row in self.segment_metrics]
+        if len(metric_indexes) != len(set(metric_indexes)):
+            raise ValueError("segment_metrics segment_index values must be unique")
+        if set(metric_indexes) != segment_indexes:
+            raise ValueError("segment_metrics must contain one row per segment")
+
+        effort_indexes = [effort.effort_index for effort in self.sprint_efforts]
+        if len(effort_indexes) != len(set(effort_indexes)):
+            raise ValueError("sprint_efforts effort_index values must be unique")
+        for effort in self.sprint_efforts:
+            if effort.segment_index not in segment_indexes:
+                raise ValueError(
+                    f"sprint effort references unknown segment_index "
+                    f"{effort.segment_index}"
+                )
+
+        speed_suppressed = self.metrics.speed_source == SpeedSource.none
+        for row in [self.metrics, *self.segment_metrics]:
+            for field in _SPEED_DERIVED_FIELDS:
+                value = getattr(row, field)
+                if speed_suppressed and value is not None:
+                    raise ValueError(
+                        f"{field} must be null when speed_source is none"
+                    )
+                if not speed_suppressed and value is None:
+                    raise ValueError(
+                        f"{field} is required unless speed_source is none"
+                    )
+        if speed_suppressed:
+            if self.metrics.top_speed_location is not None:
+                raise ValueError(
+                    "top_speed_location must be null when speed_source is none"
+                )
+            if self.sprint_efforts:
+                raise ValueError(
+                    "sprint_efforts must be empty when speed_source is none"
+                )
+        return self
+
+
+class SessionMetricsOut(BaseModel):
+    active_duration_seconds: int
+    distance_m: float
+    gap_seconds: int
+    top_speed_kmh: float | None
+    top_speed_location: LocationOut | None
+    sprint_count: int | None
+    sprint_distance_m: float | None
+    zone_walk_seconds: int | None
+    zone_jog_seconds: int | None
+    zone_run_seconds: int | None
+    zone_high_run_seconds: int | None
+    zone_sprint_seconds: int | None
+    calories_kcal: int
+    mass_kg_at_computation: float
+    speed_source: SpeedSource
+    data_quality: DataQuality
+    speed_band_bucket: SpeedBandBucket
+    speed_band_boundaries_kmh: SpeedBandBoundaries
+    pitch_long_axis_m: float | None
+    accepted_fix_count: int
+    algorithm_version: str
+    computed_at: datetime
+    ingest_flags: list[IngestFlag]
+
+
+class SegmentMetricsOut(BaseModel):
+    segment_index: int
+    active_duration_seconds: int
+    distance_m: float
+    gap_seconds: int
+    top_speed_kmh: float | None
+    sprint_count: int | None
+    sprint_distance_m: float | None
+    zone_walk_seconds: int | None
+    zone_jog_seconds: int | None
+    zone_run_seconds: int | None
+    zone_high_run_seconds: int | None
+    zone_sprint_seconds: int | None
+    calories_kcal: int
+
+
+class SprintEffortOut(BaseModel):
+    effort_index: int
+    segment_index: int
+    started_at: datetime
+    ended_at: datetime
+    duration_s: float
+    distance_m: float
+    peak_speed_kmh: float
+    peak_location: LocationOut | None
 
 
 class TrackPointIn(BaseModel):
     sequence_index: int = Field(..., ge=0)
-    segment_index: int | None = Field(default=None, ge=1)
+    segment_index: int = Field(..., ge=1)
     recorded_at: datetime
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)

@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import HTTPException, status
 from geoalchemy2.elements import WKTElement
@@ -41,6 +42,9 @@ def _serialize_full(profile: PlayerProfile) -> ProfileRead:
         date_of_birth=profile.date_of_birth,
         preferred_foot=profile.preferred_foot,
         height_cm=profile.height_cm,
+        weight_kg=float(profile.weight_kg) if profile.weight_kg is not None else None,
+        weight_updated_at=profile.weight_updated_at,
+        sex=profile.sex,
         skill_level=profile.skill_level,
         bio=profile.bio,
         location=_location_to_out(profile.location),
@@ -127,6 +131,13 @@ def update_profile(db: Session, user: User, data: ProfileUpdate) -> ProfileRead:
             )
 
     onboarding = payload.pop("onboarding_completed", None)
+
+    if "weight_kg" in payload:
+        weight = payload.pop("weight_kg")
+        profile.weight_kg = (
+            Decimal(str(round(weight, 1))) if weight is not None else None
+        )
+        profile.weight_updated_at = datetime.now(timezone.utc)
 
     for field, value in payload.items():
         setattr(profile, field, value)

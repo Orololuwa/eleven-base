@@ -14,6 +14,7 @@ from app.models.profile import (
     PositionCode,
     PreferredFoot,
     ProfileVisibility,
+    Sex,
     SkillLevel,
 )
 
@@ -64,6 +65,8 @@ class ProfileUpdate(BaseModel):
     date_of_birth: date | None = None
     preferred_foot: PreferredFoot | None = None
     height_cm: int | None = Field(default=None, ge=100, le=230)
+    weight_kg: float | None = Field(default=None, ge=30, le=200)
+    sex: Sex | None = None
     skill_level: SkillLevel | None = None
     bio: str | None = Field(default=None, max_length=500)
     location: LocationIn | None = None
@@ -80,6 +83,9 @@ class ProfileRead(BaseModel):
     date_of_birth: date | None
     preferred_foot: PreferredFoot | None
     height_cm: int | None
+    weight_kg: float | None
+    weight_updated_at: datetime | None
+    sex: Sex | None
     skill_level: SkillLevel | None
     bio: str | None
     location: LocationOut | None
