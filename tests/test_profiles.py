@@ -132,10 +132,15 @@ def test_profile_update_rejects_bad_height():
         ProfileUpdate(height_cm=50)
 
 
-@pytest.mark.parametrize("weight", [29.9, 200.1])
+@pytest.mark.parametrize("weight", [0, -1, 1000])
 def test_profile_update_rejects_bad_weight(weight: float):
     with pytest.raises(ValidationError):
         ProfileUpdate(weight_kg=weight)
+
+
+@pytest.mark.parametrize("weight", [29.9, 200.1, 250, 999.9])
+def test_profile_update_accepts_weight(weight: float):
+    assert ProfileUpdate(weight_kg=weight).weight_kg == weight
 
 
 def test_profile_update_rejects_unknown_sex():

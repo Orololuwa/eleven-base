@@ -65,7 +65,7 @@ class ProfileUpdate(BaseModel):
     date_of_birth: date | None = None
     preferred_foot: PreferredFoot | None = None
     height_cm: int | None = Field(default=None, ge=100, le=230)
-    weight_kg: float | None = Field(default=None, ge=30, le=200)
+    weight_kg: float | None = Field(default=None, ge=0.1, le=999.9)
     sex: Sex | None = None
     skill_level: SkillLevel | None = None
     bio: str | None = Field(default=None, max_length=500)
