@@ -6,13 +6,17 @@ from typing import TYPE_CHECKING
 from geoalchemy2 import Geography
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -82,6 +86,20 @@ class IngestFlag(str, enum.Enum):
 
 class PlaySession(Base):
     __tablename__ = "sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "title IS NULL OR (char_length(title) BETWEEN 1 AND 40 "
+            "AND title = btrim(title))",
+            name="sessions_title_valid",
+        ),
+        Index(
+            "ix_sessions_user_started",
+            "user_id",
+            text("started_at DESC"),
+            text("id DESC"),
+            postgresql_where=text("ended_at IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -119,6 +137,7 @@ class PlaySession(Base):
     ended_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="play_sessions")
     pitch: Mapped["Pitch | None"] = relationship("Pitch", back_populates="sessions")

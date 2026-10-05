@@ -1,7 +1,8 @@
+from datetime import date as CalendarDate
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.session import (
     ActivityKind,
@@ -137,6 +138,7 @@ class SessionRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None = None
+    title: str | None = None
     segments: list[SessionSegmentOut] = []
     pauses: list["SessionPauseOut"] = []
     metrics: "SessionMetricsOut | None" = None
@@ -376,3 +378,92 @@ class TrackPointsIn(BaseModel):
 class TrackPointsOut(BaseModel):
     inserted: int
     ignored: int
+
+
+SESSION_TITLE_MAX_LENGTH = 40
+
+
+class SessionPitchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+
+
+class SessionListMetrics(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    active_duration_seconds: int
+    distance_m: float
+    top_speed_kmh: float | None
+    speed_source: SpeedSource
+    data_quality: DataQuality
+
+
+class SessionListItem(BaseModel):
+    id: UUID
+    title: str | None
+    session_type: SessionType
+    started_at: datetime
+    ended_at: datetime
+    pitch: SessionPitchOut | None
+    metrics: SessionListMetrics | None
+
+
+class SessionListPage(BaseModel):
+    items: list[SessionListItem]
+    next_cursor: str | None
+    total_count: int | None
+
+
+class SessionCalendarDay(BaseModel):
+    date: CalendarDate
+    session_ids: list[UUID]
+
+
+class SessionCalendar(BaseModel):
+    month: str
+    days: list[SessionCalendarDay]
+
+
+class SessionDetail(BaseModel):
+    id: UUID
+    title: str | None
+    session_type: SessionType
+    play_structure: PlayStructure
+    planned_segment_length_minutes: int | None
+    extra_time_enabled: bool | None
+    planned_extra_time_segment_length_minutes: int | None
+    training_activity_options: list[ActivityKind] | None
+    pitch: SessionPitchOut | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    segments: list[SessionSegmentOut]
+    metrics: SessionMetricsOut | None
+    segment_metrics: list[SegmentMetricsOut]
+    sprint_efforts: list[SprintEffortOut]
+
+
+class SessionTitleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            if len(value) > SESSION_TITLE_MAX_LENGTH:
+                raise ValueError(
+                    f"title must be at most {SESSION_TITLE_MAX_LENGTH} characters"
+                )
+        return value
+
+
+class SessionTitleOut(BaseModel):
+    id: UUID
+    title: str | None

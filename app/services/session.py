@@ -1,12 +1,19 @@
+import base64
+import binascii
+import json
+import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
 from geoalchemy2.elements import WKTElement
+from sqlalchemy import func, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from geoalchemy2.shape import to_shape
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.models.pitch import Pitch
 from app.models.session import (
     ActivityKind,
     IngestFlag,
@@ -27,13 +34,22 @@ from app.schemas.session import (
     FinalizePauseIn,
     FinalizeSegmentIn,
     SegmentMetricsOut,
+    SessionCalendar,
+    SessionCalendarDay,
     SessionCreateIn,
+    SessionDetail,
     SessionFinalizeIn,
+    SessionListItem,
+    SessionListMetrics,
+    SessionListPage,
     SessionMetricsOut,
     SessionPauseOut,
+    SessionPitchOut,
     SessionRead,
     SessionSegmentOut,
     SessionStartIn,
+    SessionTitleOut,
+    SessionTitleUpdate,
     SprintEffortOut,
     TrackPointsIn,
     TrackPointsOut,
@@ -157,6 +173,7 @@ def _serialize_session(session: PlaySession) -> SessionRead:
         created_at=session.created_at,
         started_at=session.started_at,
         ended_at=session.ended_at,
+        title=session.title,
         segments=[_serialize_segment(s) for s in session.segments],
         pauses=[_serialize_pause(p) for p in session.pauses],
         metrics=(
@@ -803,3 +820,267 @@ def upload_track_points(
     db.commit()
 
     return TrackPointsOut(inserted=inserted, ignored=ignored)
+
+
+_MONTH_PATTERN = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def _invalid_cursor() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="Invalid cursor",
+    )
+
+
+def _encode_cursor(started_at: datetime, session_id: uuid.UUID) -> str:
+    raw = json.dumps({"s": started_at.isoformat(), "i": str(session_id)})
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()))
+        started_at = datetime.fromisoformat(payload["s"])
+        session_id = uuid.UUID(payload["i"])
+    except (binascii.Error, ValueError, KeyError, TypeError, UnicodeDecodeError):
+        raise _invalid_cursor() from None
+    if started_at.tzinfo is None:
+        raise _invalid_cursor()
+    return started_at, session_id
+
+
+def _history_query(db: Session, user: User, session_type: SessionType | None):
+    query = db.query(PlaySession).filter(
+        PlaySession.user_id == user.id,
+        PlaySession.ended_at.isnot(None),
+    )
+    if session_type is not None:
+        query = query.filter(PlaySession.session_type == session_type)
+    return query
+
+
+def list_history(
+    db: Session,
+    user: User,
+    session_type: SessionType | None,
+    cursor: str | None,
+    limit: int,
+) -> SessionListPage:
+    total_count: int | None = None
+    if cursor is None:
+        total_count = (
+            _history_query(db, user, session_type)
+            .with_entities(func.count(PlaySession.id))
+            .scalar()
+        )
+
+    query = (
+        _history_query(db, user, session_type)
+        .outerjoin(SessionMetrics, SessionMetrics.session_id == PlaySession.id)
+        .outerjoin(Pitch, Pitch.id == PlaySession.pitch_id)
+        .with_entities(
+            PlaySession.id,
+            PlaySession.title,
+            PlaySession.session_type,
+            PlaySession.started_at,
+            PlaySession.ended_at,
+            PlaySession.pitch_id,
+            Pitch.name.label("pitch_name"),
+            SessionMetrics.id.label("metrics_id"),
+            SessionMetrics.active_duration_seconds,
+            SessionMetrics.distance_m,
+            SessionMetrics.top_speed_kmh,
+            SessionMetrics.speed_source,
+            SessionMetrics.data_quality,
+        )
+    )
+    if cursor is not None:
+        cursor_started_at, cursor_id = _decode_cursor(cursor)
+        query = query.filter(
+            tuple_(PlaySession.started_at, PlaySession.id)
+            < tuple_(cursor_started_at, cursor_id)
+        )
+
+    rows = (
+        query.order_by(PlaySession.started_at.desc(), PlaySession.id.desc())
+        .limit(limit + 1)
+        .all()
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    items = [
+        SessionListItem(
+            id=row.id,
+            title=row.title,
+            session_type=row.session_type,
+            started_at=row.started_at,
+            ended_at=row.ended_at,
+            pitch=(
+                SessionPitchOut(id=row.pitch_id, name=row.pitch_name)
+                if row.pitch_id is not None and row.pitch_name is not None
+                else None
+            ),
+            metrics=(
+                SessionListMetrics(
+                    active_duration_seconds=row.active_duration_seconds,
+                    distance_m=row.distance_m,
+                    top_speed_kmh=row.top_speed_kmh,
+                    speed_source=row.speed_source,
+                    data_quality=row.data_quality,
+                )
+                if row.metrics_id is not None
+                else None
+            ),
+        )
+        for row in rows
+    ]
+    next_cursor = (
+        _encode_cursor(rows[-1].started_at, rows[-1].id)
+        if has_more and rows
+        else None
+    )
+    return SessionListPage(
+        items=items, next_cursor=next_cursor, total_count=total_count
+    )
+
+
+def _parse_month(month: str) -> tuple[int, int]:
+    match = _MONTH_PATTERN.match(month)
+    if match is None or not 1 <= int(match.group(2)) <= 12:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="month must be YYYY-MM",
+        )
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_timezone(tz: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tz must be a valid IANA timezone",
+        ) from None
+
+
+def get_history_calendar(
+    db: Session,
+    user: User,
+    month: str,
+    tz: str,
+    session_type: SessionType | None,
+) -> SessionCalendar:
+    year, month_number = _parse_month(month)
+    zone = _parse_timezone(tz)
+    month_start = datetime(year, month_number, 1, tzinfo=zone)
+    next_year, next_month = (
+        (year + 1, 1) if month_number == 12 else (year, month_number + 1)
+    )
+    month_end = datetime(next_year, next_month, 1, tzinfo=zone)
+
+    rows = (
+        _history_query(db, user, session_type)
+        .filter(
+            PlaySession.started_at >= month_start,
+            PlaySession.started_at < month_end,
+        )
+        .with_entities(PlaySession.id, PlaySession.started_at)
+        .order_by(PlaySession.started_at.desc(), PlaySession.id.desc())
+        .all()
+    )
+
+    by_day: dict[date, list[uuid.UUID]] = {}
+    for row in rows:
+        local_date = row.started_at.astimezone(zone).date()
+        by_day.setdefault(local_date, []).append(row.id)
+
+    return SessionCalendar(
+        month=f"{year:04d}-{month_number:02d}",
+        days=[
+            SessionCalendarDay(date=day, session_ids=session_ids)
+            for day, session_ids in sorted(by_day.items())
+        ],
+    )
+
+
+def get_session_detail(
+    db: Session, user: User, session_id: uuid.UUID
+) -> SessionDetail:
+    play_session = _require_owned_session(db, user, session_id)
+    segment_indexes = {s.id: s.segment_index for s in play_session.segments}
+    pitch = play_session.pitch
+    return SessionDetail(
+        id=play_session.id,
+        title=play_session.title,
+        session_type=play_session.session_type,
+        play_structure=play_session.play_structure,
+        planned_segment_length_minutes=play_session.planned_segment_length_minutes,
+        extra_time_enabled=play_session.extra_time_enabled,
+        planned_extra_time_segment_length_minutes=(
+            play_session.planned_extra_time_segment_length_minutes
+        ),
+        training_activity_options=play_session.training_activity_options,
+        pitch=(
+            SessionPitchOut(id=pitch.id, name=pitch.name)
+            if pitch is not None
+            else None
+        ),
+        created_at=play_session.created_at,
+        started_at=play_session.started_at,
+        ended_at=play_session.ended_at,
+        segments=[_serialize_segment(s) for s in play_session.segments],
+        metrics=(
+            _serialize_session_metrics(play_session.metrics)
+            if play_session.metrics is not None
+            else None
+        ),
+        segment_metrics=[
+            _serialize_segment_metrics(s, s.metrics)
+            for s in play_session.segments
+            if s.metrics is not None
+        ],
+        sprint_efforts=[
+            _serialize_sprint_effort(e, segment_indexes)
+            for e in play_session.sprint_efforts
+        ],
+    )
+
+
+def rename_session(
+    db: Session,
+    user: User,
+    session_id: uuid.UUID,
+    data: SessionTitleUpdate,
+) -> SessionTitleOut:
+    play_session = (
+        db.query(PlaySession)
+        .filter(PlaySession.id == session_id, PlaySession.user_id == user.id)
+        .one_or_none()
+    )
+    if play_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    play_session.title = data.title
+    db.add(play_session)
+    db.commit()
+    return SessionTitleOut(id=play_session.id, title=play_session.title)
+
+
+def delete_session(db: Session, user: User, session_id: uuid.UUID) -> None:
+    deleted = (
+        db.query(PlaySession)
+        .filter(PlaySession.id == session_id, PlaySession.user_id == user.id)
+        .delete(synchronize_session=False)
+    )
+    if deleted == 0:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    db.commit()
