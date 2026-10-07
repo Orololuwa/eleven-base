@@ -467,3 +467,21 @@ class SessionTitleUpdate(BaseModel):
 class SessionTitleOut(BaseModel):
     id: UUID
     title: str | None
+
+
+class WeeklySessionMetrics(BaseModel):
+    active_duration_seconds: int
+    distance_m: float
+    data_quality: DataQuality
+
+
+class WeeklySessionItem(BaseModel):
+    id: UUID
+    started_at: datetime
+    metrics: WeeklySessionMetrics | None
+
+
+class WeeklySessionWindow(BaseModel):
+    start: datetime
+    end: datetime
+    items: list[WeeklySessionItem]

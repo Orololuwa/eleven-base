@@ -3,7 +3,7 @@ import binascii
 import json
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
@@ -53,6 +53,9 @@ from app.schemas.session import (
     SprintEffortOut,
     TrackPointsIn,
     TrackPointsOut,
+    WeeklySessionItem,
+    WeeklySessionMetrics,
+    WeeklySessionWindow,
 )
 from app.services import pitch as pitch_service
 
@@ -1002,6 +1005,79 @@ def get_history_calendar(
         days=[
             SessionCalendarDay(date=day, session_ids=session_ids)
             for day, session_ids in sorted(by_day.items())
+        ],
+    )
+
+
+_MAX_WEEKLY_WINDOW = timedelta(days=15)
+
+
+def _require_aware_instant(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{name} must be an ISO-8601 instant with an offset",
+        )
+
+
+def get_weekly_window(
+    db: Session,
+    user: User,
+    start: datetime,
+    end: datetime,
+) -> WeeklySessionWindow:
+    _require_aware_instant(start, "start")
+    _require_aware_instant(end, "end")
+    if start >= end:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="start must be before end",
+        )
+    if end - start > _MAX_WEEKLY_WINDOW:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end - start must not exceed 15 days",
+        )
+
+    rows = (
+        db.query(PlaySession)
+        .outerjoin(SessionMetrics, SessionMetrics.session_id == PlaySession.id)
+        .filter(
+            PlaySession.user_id == user.id,
+            PlaySession.ended_at.isnot(None),
+            PlaySession.started_at >= start,
+            PlaySession.started_at < end,
+        )
+        .with_entities(
+            PlaySession.id,
+            PlaySession.started_at,
+            SessionMetrics.id.label("metrics_id"),
+            SessionMetrics.active_duration_seconds,
+            SessionMetrics.distance_m,
+            SessionMetrics.data_quality,
+        )
+        .order_by(PlaySession.started_at.desc(), PlaySession.id.desc())
+        .all()
+    )
+
+    return WeeklySessionWindow(
+        start=start,
+        end=end,
+        items=[
+            WeeklySessionItem(
+                id=row.id,
+                started_at=row.started_at,
+                metrics=(
+                    WeeklySessionMetrics(
+                        active_duration_seconds=row.active_duration_seconds,
+                        distance_m=row.distance_m,
+                        data_quality=row.data_quality,
+                    )
+                    if row.metrics_id is not None
+                    else None
+                ),
+            )
+            for row in rows
         ],
     )
 

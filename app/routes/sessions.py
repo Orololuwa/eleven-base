@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from app.schemas.session import (
     SessionTitleUpdate,
     TrackPointsIn,
     TrackPointsOut,
+    WeeklySessionWindow,
 )
 from app.services import session as session_service
 
@@ -46,6 +48,22 @@ def get_sessions_calendar(
     session_type: SessionType | None = None,
 ) -> SessionCalendar:
     return session_service.get_history_calendar(db, user, month, tz, session_type)
+
+
+@router.get("/weekly", response_model=WeeklySessionWindow)
+def get_sessions_weekly(
+    start: Annotated[
+        datetime,
+        Query(description="Inclusive ISO-8601 instant with an offset"),
+    ],
+    end: Annotated[
+        datetime,
+        Query(description="Exclusive ISO-8601 instant with an offset"),
+    ],
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> WeeklySessionWindow:
+    return session_service.get_weekly_window(db, user, start, end)
 
 
 @router.post("", response_model=SessionRead, status_code=status.HTTP_201_CREATED)
